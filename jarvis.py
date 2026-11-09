@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Jarvis ไทย — "น้องจาง" ผู้ช่วยสั่งงาน macOS ด้วยเสียงภาษาไทย แบบ full duplex
-(ฟังตลอดเวลา ไม่ต้องกดปุ่ม เรียก "น้องจาง" แล้วสั่งได้เลย พูดแทรกตอนน้องจางกำลังพูดได้)
+Jarvis ไทย — "จางวิท" ผู้ช่วยสั่งงานคอมพิวเตอร์ด้วยเสียงภาษาไทย แบบ full duplex
+(ฟังตลอดเวลา ไม่ต้องกดปุ่ม เรียก "จางวิท" แล้วสั่งได้เลย พูดแทรกตอนจางวิทกำลังพูดได้)
 
 ท่อการทำงาน
-  ไมค์ ─► ตัดเสียงสะท้อน (AEC) ─► VAD ตัดประโยค ─► Whisper ในเครื่อง (ภาษาไทย) ─► ได้ยิน "น้องจาง" ไหม
+  ไมค์ ─► ตัดเสียงสะท้อน (AEC) ─► VAD ตัดประโยค ─► Whisper ในเครื่อง (ภาษาไทย) ─► ได้ยิน "จางวิท" ไหม
        ─► Jev ตัดสินใจ (typesafe-sdk, speculative fan-out)
-       ─► สั่ง macOS (osascript/shell) | ท่องเว็บด้วย Playwright (browser_agent.py) | ถาม LLM ผ่าน OpenRouter
-       ─► พูดตอบด้วย say -v Kanya (เล่นผ่านลำโพงเอง จึงหยุดได้ทันทีเมื่อถูกพูดแทรก)
+       ─► สั่งเครื่อง | ท่องเว็บด้วย Playwright (browser_agent.py) | ถาม LLM
+       ─► พูดตอบด้วยเสียงไทย (เล่นผ่านลำโพงเอง จึงหยุดได้ทันทีเมื่อถูกพูดแทรก)
 
 วิธีใช้
-  python jarvis.py                          ฟังไมค์ (full duplex) เรียก "น้องจาง ..." ก่อนสั่ง
+  python jarvis.py                          ฟังไมค์ (full duplex) เรียก "จางวิท ..." ก่อนสั่ง
   python jarvis.py --text "เปิดสปอติฟาย"      สั่งด้วยข้อความ
   python jarvis.py --dry-run                ไม่สั่งเครื่องจริง แค่ print ว่าจะทำอะไร
   python jarvis.py --eval                   วัดความแม่นกับชุดประโยคทดสอบภาษาไทย
@@ -39,19 +39,41 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 
+import json
 import numpy as np
 import requests
 from dotenv import load_dotenv
-from typesafe_sdk import (
-    Choice,
-    ChoiceAnswer,
-    Noul,
-    NoulAnswer,
-    RetryPolicy,
-    Score,
-    TypeSafeClient,
-    TypeSafeError,
-)
+try:
+    from typesafe_sdk import (
+        Choice,
+        ChoiceAnswer,
+        Noul,
+        NoulAnswer,
+        RetryPolicy,
+        Score,
+        TypeSafeClient,
+        TypeSafeError,
+    )
+except ImportError:
+    @dataclass
+    class Choice:
+        instructions: str
+        criteria: dict
+
+    @dataclass
+    class Noul:
+        instructions: str
+        criteria: dict
+
+    @dataclass
+    class Score:
+        instructions: str
+        criteria: list
+
+    class TypeSafeError(Exception):
+        pass
+
+    ChoiceAnswer = NoulAnswer = RetryPolicy = TypeSafeClient = None
 
 # ════════════════════════════════════════════════════════════════════════════
 # 1) ปรับแต่งได้ง่าย: แอป / คำสั่ง / ระดับเสียง / ประโยคตอบ
@@ -77,7 +99,7 @@ APPS = {
 }
 
 # เว็บยอดนิยม: "เปิดยูทูบ" = เปิดเว็บตรงๆ เลย (เร็วกว่าและไม่เปลือง token เท่าให้เอเจนต์ท่องเว็บ)
-# "ชื่อ": ("ชื่อที่น้องจางพูด", "คำอธิบายให้ Jev", "URL")
+# "ชื่อ": ("ชื่อที่จางวิทพูด", "คำอธิบายให้ Jev", "URL")
 SITES = {
     "YouTube":     ("ยูทูบ", "ยูทูบ", "https://www.youtube.com"),
     "Facebook":    ("เฟซบุ๊ก", "เฟซบุ๊ก, เฟส", "https://www.facebook.com"),
@@ -158,8 +180,8 @@ REPLIES = {
     "computer_task":  ["ได้ เดี๋ยวจัดการให้", "โอเค ขอคุมเครื่องแป๊บนะ"],
     "none":           ["อันนี้เรายังทำไม่เป็นอะ"],
     # ── ประโยคของระบบ ──
-    "ready":          ["น้องจางมาแล้ว เรียกได้เลย", "พร้อมละ ว่าไงดี"],
-    "wake":           ["ว่าไง", "ครับ", "ว่ามาเลย"],
+    "ready":          ["จางวิทมาแล้ว เรียกได้เลย", "พร้อมละครับ"],
+    "wake":           ["ครับผม", "ครับ"],
     "which_app":      ["เปิดแอปไหนนะ หาชื่อนั้นไม่เจออะ", "แอปอะไรนะ ขอชื่ออีกทีได้ไหม"],
     "retry":          ["เมื่อกี้ว่าไงนะ", "ไม่ค่อยชัดอะ ขออีกทีได้ไหม", "ขอโทษ ไม่ทันได้ยิน พูดอีกรอบนะ"],
     "skip":           ["งั้นข้ามก่อนนะ", "ยังจับไม่ได้ ข้ามไปก่อนละกัน"],
@@ -205,8 +227,8 @@ CHAT_REPLIES = {
     "complaint":   ["ขอโทษนะ เดี๋ยวเราปรับให้ดีขึ้น บอกอีกทีได้ไหมว่าอยากให้ทำอะไร",
                     "ขอโทษจริงๆ ลองบอกใหม่อีกทีนะ เราจะตั้งใจฟัง"],
     "how_are_you": ["สบายดี พร้อมช่วยอยู่ นายล่ะเป็นไงบ้าง", "ดีเลย วันนี้นายเป็นไงบ้าง"],
-    "who_are_you": ["เราน้องจาง ผู้ช่วยบนเครื่องแมคของนายไง", "น้องจางไง เพื่อนที่คอยช่วยใช้คอมให้"],
-    "abilities":   ["เปิดปิดแอป ปรับเสียง คุมเพลง หาของในเว็บ อ่านจอ แล้วก็คลิกหรือพิมพ์ให้ได้ เรียกน้องจางแล้วสั่งมาเลย"],
+    "who_are_you": ["เราจางวิท ผู้ช่วยบนเครื่องของนายไง", "จางวิทไง เพื่อนที่คอยช่วยใช้คอมให้"],
+    "abilities":   ["เปิดปิดแอป ปรับเสียง คุมเพลง หาของในเว็บ อ่านจอ แล้วก็คลิกหรือพิมพ์ให้ได้ เรียกจางวิทแล้วสั่งมาเลย"],
     "tired":       ["พักบ้างนะ ดื่มน้ำด้วย", "เหนื่อยก็พักก่อน เดี๋ยวค่อยลุยต่อ"],
     "hungry":      ["หาอะไรกินก่อนเลย", "ไปกินข้าวก่อนนะ เดี๋ยวค่อยลุยต่อ"],
     "bored":       ["เปิดเพลงฟังไหม", "พักสายตาแป๊บนึงก็ได้นะ"],
@@ -225,11 +247,10 @@ MOOD_INTENTS = {"tired", "hungry", "bored", "sad"}
 ASKS_RE = re.compile(r"อะไร|ยังไง|อย่างไร|ทำไม|ไหม|มั้ย|หรือเปล่า|กี่|ที่ไหน|เท่าไ|ช่วย|แนะนำ|ดี\s*$")
 
 # คำใบ้ให้ Whisper: ประโยคไทยปนชื่อแอปอังกฤษ ช่วยให้สะกดชื่อแอปและคำปลุกถูก
-WHISPER_PROMPT = "น้องจาง เปิด Spotify ปิด LINE เปิด Slack เปิด Google Chrome เปิด VS Code เพิ่มเสียง ลดเสียง หยุดเพลง หาห้องพัก กี่โมงแล้ว"
+WHISPER_PROMPT = "จางวิท เปิด Spotify ปิด LINE เปิด Slack เปิด Google Chrome เปิด VS Code เพิ่มเสียง ลดเสียง หยุดเพลง หาห้องพัก กี่โมงแล้ว"
 
-# รูปที่ Whisper มักถอดคำว่า "น้องจาง" ออกมา: น้องจาง น้อง จาง น้องจ้าง น้องจ๋าง น้องจาน น้องจัง น้องจาก นองจ่าง
-# ต้องมีตัวสะกด ง/น (หรือ ก ที่จบคำ) เสมอ กันคำทั่วไปอย่าง "น้องจ๋า", "น้องจัด", "น้องจับ" ปลุกผิด
-NONG_JANG_RE = r"(?:น้?อง|ด้อง|ท่าน)[\s,]*จ[่้๊๋]?[ัา][่้๊๋]?(?:[งน]|ก(?=[\s,.!?]|$))"
+# รูปที่ Whisper มักถอดคำว่า "จางวิท" ออกมา: จางวิท จาง วิท จางวิทย์ จางวิช จางวิด จางวิส จาร์วิส จาวิส อาจารย์วิท
+JANG_WIT_RE = r"(?:(?:น้อง|อาจารย์|จารย์)?[\s,]*(?:จ|ช|ท|ก)[่้๊๋]?[ัา]ร?[งนรย]?[\s,]*ว[ิี][่้๊๋]?(?:ท|ต|ด|ช|ธ|ซ|ส|ญ|ทย์|ทธิ์|ชญ์|ตร์|ร์)|jarvis|jangwit)"
 
 # ข้อความผีที่ Whisper ชอบแต่งขึ้นเองตอนเงียบ/มีเสียงรบกวน → ทิ้งเลย ไม่ต้องถาม Jev
 HALLUCINATIONS = ("ขอบคุณที่รับชม", "ขอบคุณสำหรับการรับชม", "ขอบคุณสำหรับชม", "ขอบคุณติดตาม", "ขอบคุณที่ติดตาม",
@@ -242,6 +263,7 @@ HALLUCINATIONS = ("ขอบคุณที่รับชม", "ขอบคุ
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
+IS_WIN = platform.system() == "Windows"
 
 
 def env_str(name: str, default: str = "") -> str:
@@ -258,19 +280,25 @@ def env_float(name: str, default: float) -> float:
 
 TYPESAFE_API_KEY = env_str("TYPESAFE_API_KEY")
 OPENROUTER_API_KEY = env_str("OPENROUTER_API_KEY")
+TOGETHER_API_KEY = env_str("TOGETHER_API_KEY") or env_str("TOGETHERAI_API_KEY")
 GOOGLE_API_KEY = env_str("GOOGLE_API_KEY") or env_str("GEMINI_API_KEY")
 
 # ผู้ให้บริการ LLM (ตอบคำถาม + ขับเบราว์เซอร์) ทุกตัวใช้ endpoint แบบ OpenAI chat completions จึงใช้โค้ดชุดเดียว
-# LLM_MODE: local = รันในเครื่อง (mlx_lm.server, ฟรี ไม่มีโควตา ข้อมูลไม่ออกนอกเครื่อง) · cloud = OpenRouter/Gemini
-LLM_MODE = env_str("LLM_MODE", "local").lower()
-LOCAL_LLM_MODEL = env_str("LOCAL_LLM_MODEL", "tawankri/typhoon2.5-qwen3-4b-mlx-4Bit")   # Typhoon 2.5 (SCB10X) 4-bit
-LOCAL_LLM_PORT = int(env_float("LOCAL_LLM_PORT", 18765))
+# LLM_MODE: local = รันในเครื่อง (mlx_lm.server บน Mac หรือ Ollama/LM Studio บน Windows) · cloud = OpenRouter / TogetherAI / Gemini
+_default_llm_mode = "cloud" if IS_WIN and (OPENROUTER_API_KEY or TOGETHER_API_KEY or GOOGLE_API_KEY) else "local"
+LLM_MODE = env_str("LLM_MODE", _default_llm_mode).lower()
+LOCAL_LLM_MODEL = env_str("LOCAL_LLM_MODEL", "scb10x/llama3.1-typhoon2-8b-instruct" if IS_WIN else "tawankri/typhoon2.5-qwen3-4b-mlx-4Bit")
+LOCAL_LLM_PORT = int(env_float("LOCAL_LLM_PORT", 11434 if IS_WIN else 18765))
+LOCAL_LLM_URL = env_str("LOCAL_LLM_URL", "")
 if LLM_MODE == "local":
-    LLM_PROVIDER, LLM_URL, LLM_KEY = "ในเครื่อง", f"http://127.0.0.1:{LOCAL_LLM_PORT}/v1/chat/completions", "local"
-    _DEFAULT_MODEL, _FALLBACK_MODEL = "default_model", ""        # mlx_lm.server ต้องใช้ชื่อนี้ (ชื่ออื่น = โหลดโมเดลใหม่)
+    LLM_PROVIDER, LLM_URL, LLM_KEY = "ในเครื่อง", (LOCAL_LLM_URL or f"http://127.0.0.1:{LOCAL_LLM_PORT}/v1/chat/completions"), "local"
+    _DEFAULT_MODEL, _FALLBACK_MODEL = (LOCAL_LLM_MODEL if IS_WIN else "default_model"), ""
 elif OPENROUTER_API_KEY:
     LLM_PROVIDER, LLM_URL, LLM_KEY = "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_API_KEY
     _DEFAULT_MODEL, _FALLBACK_MODEL = "anthropic/claude-haiku-4.5", ""
+elif TOGETHER_API_KEY:
+    LLM_PROVIDER, LLM_URL, LLM_KEY = "TogetherAI", "https://api.together.xyz/v1/chat/completions", TOGETHER_API_KEY
+    _DEFAULT_MODEL, _FALLBACK_MODEL = "Qwen/Qwen3.5-9B", "Qwen/Qwen2.5-7B-Instruct-Turbo"
 elif GOOGLE_API_KEY:
     LLM_PROVIDER, LLM_URL, LLM_KEY = "Google", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", GOOGLE_API_KEY
     # วัดจริง: 3.5-flash-lite ตอบไทยสั้นๆ ~1.3 วิ ส่วน flash-latest คิวเต็ม (503) บ่อยและช้า 6-18 วิ
@@ -291,18 +319,34 @@ LLM_MODEL = _model_env("LLM_MODEL", _DEFAULT_MODEL)
 AGENT_MODEL = _model_env("AGENT_MODEL", LLM_MODEL)       # โมเดลที่ขับเบราว์เซอร์ (งานซับซ้อนใช้รุ่นใหญ่ขึ้นได้)
 JEV_MODEL = env_str("JEV_MODEL", "jev-latest")
 CONF_MIN = env_float("CONF_MIN", 0.65)
-TTS_VOICE = env_str("TTS_VOICE", "Kanya")
-TTS_RATE = int(env_float("TTS_RATE", 230))
-# ระดับเสียง (pitch base ของ say) เว้นว่าง = เสียงปกติ · 28 ≈ ทุ้มแบบผู้ชาย (Kanya 211 Hz → ~110 Hz)
-TTS_PITCH = env_str("TTS_PITCH", "28")
+TTS_VOICE = env_str("TTS_VOICE", "th-TH-NiwatNeural" if IS_WIN else "Kanya")
+TTS_RATE = int(env_float("TTS_RATE", 205))
+# ระดับเสียง (pitch base ของ say หรือ edge-tts) เว้นว่าง = เสียงปกติ · 28 ≈ ทุ้มแบบผู้ชาย
+TTS_PITCH = env_str("TTS_PITCH", "" if IS_WIN else "28")
 BARGE_IN = env_str("BARGE_IN", "auto").lower()          # auto | on | off
 SILENCE_MS = env_float("SILENCE_MS", 550)
 VAD_THRESHOLD = env_float("VAD_THRESHOLD", 0.5)
+WIN_SHORTCUTS: dict[str, Path] = {}
+
+
 def _installed_apps() -> dict:
     """แอปทั้งหมดที่ติดตั้งในเครื่อง → ใส่เป็นตัวเลือกของ Jev ให้สั่งเปิด/ปิดได้ทุกแอป (EXTRA_APPS=off เพื่อปิด)
     Choice ของ Jev รับได้สูงสุด 255 ตัวเลือก จึงจำกัดไว้ที่ 220"""
     if env_str("EXTRA_APPS", "auto").lower() in ("off", "0", "no"):
         return {}
+    if IS_WIN:
+        start_dirs = [
+            Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Microsoft/Windows/Start Menu/Programs",
+            Path(os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))) / "Microsoft/Windows/Start Menu/Programs",
+        ]
+        ignore = re.compile(r"uninstall|ถอนการติดตั้ง|help|readme|manual|update|setup|install|website|command prompt", re.I)
+        for d in start_dirs:
+            if d.is_dir():
+                for p in d.rglob("*.lnk"):
+                    if not ignore.search(p.stem) and p.stem not in APPS and p.stem not in SITES:
+                        WIN_SHORTCUTS.setdefault(p.stem, p)
+        names = sorted(WIN_SHORTCUTS.keys())[:220]
+        return {n: (n, f"{n} (app installed on this Windows PC)") for n in names}
     dirs = ["/Applications", "/System/Applications", "/System/Applications/Utilities", Path.home() / "Applications"]
     paths = {p.stem: p for d in dirs if Path(d).is_dir() for p in Path(d).glob("*.app")}
     names = sorted(set(paths) - set(APPS) - set(SITES))[:220]
@@ -324,10 +368,10 @@ EXTRA_APPS = _installed_apps()
 MENUBAR = env_str("MENUBAR", "on").lower() not in ("off", "0", "no")   # ไอคอนเปิด/ปิดการฟังบนแถบเมนู
 HUD = env_str("HUD", "on").lower() not in ("off", "0", "no")           # หน้าจอ J.A.R.V.I.S ลอยบนจอ (ต้องมีเมนูบาร์)
 
-# คำปลุก: ค่าเริ่มต้น "น้องจาง" (คั่นหลายคำด้วย ,) ตั้ง WAKE_WORD=off เพื่อฟังทุกประโยคโดยไม่ต้องเรียกชื่อ
-_wake = env_str("WAKE_WORD", "น้องจาง")
+# คำปลุก: ค่าเริ่มต้น "จางวิท" (คั่นหลายคำด้วย ,) ตั้ง WAKE_WORD=off เพื่อฟังทุกประโยคโดยไม่ต้องเรียกชื่อ
+_wake = env_str("WAKE_WORD", "จางวิท")
 WAKE_WORDS = [] if _wake.lower() in ("off", "none", "-") else [w.strip() for w in _wake.split(",") if w.strip()]
-WAKE_RE = re.compile("|".join(NONG_JANG_RE if w == "น้องจาง" else re.escape(w) for w in WAKE_WORDS)) \
+WAKE_RE = re.compile("|".join(JANG_WIT_RE if w == "จางวิท" else re.escape(w) for w in WAKE_WORDS), re.I) \
     if WAKE_WORDS else None
 
 RATE = 16000                          # ทุกอย่างเป็น 16 kHz mono
@@ -340,15 +384,15 @@ COMPOUND_MIN = env_float("COMPOUND_MIN", 0.5)   # สเปก: ≥ 0.5 ถา�
 HISTORY_IDLE_SEC = 180                # เงียบนานเกิน 3 นาที = เริ่มเรื่องใหม่ ล้างประวัติ (ไม่ส่งบทเก่าให้ LLM เปลือง token)   # category=question แต่ action=web_task มั่นใจเท่านี้ → ค้นเว็บแทนตอบเอง
 SPEAK_FIRST = {"volume_mute", "lock_screen", "sleep"}  # พูดให้จบก่อนค่อยทำ ไม่งั้นจะไม่ได้ยิน
 VOLUME_STEP = 10
-FOLLOWUP_SEC = env_float("CONVO_SEC", 30)   # หลังคุยกันแล้ว คุยต่อได้เรื่อยๆ โดยไม่ต้องเรียก "น้องจาง" ซ้ำภายในกี่วินาที
-BROWSER_PROFILE = ROOT / ".browser-profile"   # โปรไฟล์ Chrome แยกของน้องจาง (ไม่ยุ่งกับโปรไฟล์หลัก)
+FOLLOWUP_SEC = env_float("CONVO_SEC", 30)   # หลังคุยกันแล้ว คุยต่อได้เรื่อยๆ โดยไม่ต้องเรียก "จางวิท" ซ้ำภายในกี่วินาที
+BROWSER_PROFILE = ROOT / ".browser-profile"   # โปรไฟล์ Chrome แยกของจางวิท (ไม่ยุ่งกับโปรไฟล์หลัก)
 MLX_WHISPER_REPO = env_str("MLX_WHISPER_REPO", "mlx-community/whisper-large-v3-turbo")
 FASTER_WHISPER_MODEL = "large-v3-turbo"
 # คำใบ้ให้ Whisper: auto = ใช้กับ Whisper ทั่วไป แต่ไม่ใช้กับรุ่นที่จูนไทยมาแล้ว (Typhoon) ซึ่งคำใบ้ทำให้วน
 _prompt_mode = env_str("WHISPER_PROMPT_MODE", "auto").lower()
 USE_WHISPER_PROMPT = _prompt_mode == "on" or (_prompt_mode == "auto" and "typhoon" not in MLX_WHISPER_REPO.lower())
 SAVE_UTTERANCES = env_str("SAVE_UTTERANCES")           # ใส่โฟลเดอร์ = เก็บเสียงแต่ละประโยคเป็น WAV ไว้ทดสอบ STT
-# เสียงคนคุยกันที่ไม่ได้เรียกน้องจาง: ปกติไม่พิมพ์ข้อความลง log (log ของแอปเก็บเป็นไฟล์) · all = พิมพ์ไว้ดีบัก
+# เสียงคนคุยกันที่ไม่ได้เรียกจางวิท: ปกติไม่พิมพ์ข้อความลง log (log ของแอปเก็บเป็นไฟล์) · all = พิมพ์ไว้ดีบัก
 LOG_HEARD = env_str("LOG_HEARD", "").lower()
 # ความเห็นที่สอง: ถ้าเรียกชื่อแล้วแต่ Jev ยังไม่มั่นใจ ให้ถอดเสียงเดิมซ้ำด้วยรุ่นที่จูนภาษาไทยก่อนขอให้พูดใหม่
 # auto = ใช้ถ้าโมเดลอยู่ในเครื่องแล้ว (ไม่ดาวน์โหลดเอง), off = ปิด, หรือใส่ชื่อ repo MLX เอง
@@ -417,34 +461,29 @@ def pick(key: str, **kw) -> str:
 CANNED: set[str] = set()              # ประโยคสำเร็จรูป (ไม่มีข้อมูลของผู้ใช้) เก็บเสียงลงดิสก์ได้
 
 
-# จากเสียงจริงของผู้ใช้: Whisper ได้ยิน "น้องจาง" ต้นประโยคเป็น "ต้องจาง", "ต้องกลาง", "กล้องกลาง"
-# → รับรูปสัมผัส "_อง _าง" ที่ต้นประโยค เฉพาะพยัญชนะที่ถูกได้ยินสลับจริง (ไม่รับ "ท้องว่าง", "ต้องการ", "ของกลาง")
-_WAKE_RHYME = re.compile(r"^\s*(?:น|ต|ด|ก|กล)[่้๊๋]?อง[\s,]*(?:จ|ก|กล)[่้๊๋]?า[งน]")
+# รับรูปพ้องเสียงกับ "จางวิท" ที่ต้นประโยค เช่น "ทางวิท", "กางวิท", "ชางวิท", "จางมิด", "จางนิด"
+_WAKE_RHYME = re.compile(r"^\s*(?:จ|ช|ท|ก|ด)[่้๊๋]?[ัา]ร?[งนรย]?[\s,]*(?:ว|ม|น|บ)[ิี][่้๊๋]?(?:ท|ต|ด|ช|ธ|ซ|ส|ญ)")
 
 
 def _fuzzy_wake_prefix(text: str) -> int:
-    """ต้นประโยคฟังคล้าย "น้องจาง" ไหม คืนความยาวที่ต้องตัดออก หรือ 0"""
-    if "น้องจาง" not in WAKE_WORDS:
+    """ต้นประโยคฟังคล้าย "จางวิท" ไหม คืนความยาวที่ต้องตัดออก หรือ 0"""
+    if "จางวิท" not in WAKE_WORDS:
         return 0
     m = _WAKE_RHYME.match(text)
     return m.end() if m else 0
 
 
-# จากเสียงจริงของผู้ใช้: ตัวถอดเสียงของ Apple ได้ยิน "น้องจาง" ต้นประโยคเป็น "ล้างจาน" "น้องแจง" "ต้องการ" "น้องจารย์"
-# "อาจารย์" ฯลฯ (น ของผู้ใช้ฟังคล้าย ล) → รับรูปเหล่านี้เฉพาะเมื่อตามด้วยคำสั่งทันที (กัน "ต้องจ่ายค่าไฟ" "ล้างจานยัง")
-# วัดแล้ว: เจอคำปลุก 56/139 (Whisper 55) · ใช้กับข้อความจาก Apple เท่านั้น
 _APPLE_WAKE_RE = re.compile(
-    r"^\s*(?:(?:น้อง|ต้อง)\s*(?:จ[่้]?า(?:รย์|ง|น|ก)?|แจง|ตาล|กานต์|จัง)|ล้าง\s*จาน"
-    r"|ต้องการ|นอกจาก|หลังจาก|จ้าง|จาน|อาจารย์)"
+    r"^\s*(?:(?:จาง|ทาง|กาง|ชาง|อาจารย์|จารย์)\s*(?:วิท|วิทย์|วิช|วิด|วิส|มิด|นิด)|จาร์วิส|จาวิส)"
     r"(?=\s*(?:เปิด|ปิด|หา|ค้น|ช่วย|ดู|ทำ|ฟัง|อยาก|อ่าน|เล่น|หยุด|เพิ่ม|ลด|ขอ|บอก|คลิก|พิมพ์|ตั้ง|ปรับ|ก็|วันนี้|ตอนนี้|$))")
 
 
 def fix_apple_wake(text: str) -> str:
-    """แก้คำปลุกที่ Apple ได้ยินเพี้ยนให้เป็น "น้องจาง" (ขั้นต่อไปจะได้ทำงานเหมือนเดิมทุกอย่าง)"""
-    if "น้องจาง" not in WAKE_WORDS or has_wake(text):
+    """แก้คำปลุกที่ Apple ได้ยินเพี้ยนให้เป็น "จางวิท" (ขั้นต่อไปจะได้ทำงานเหมือนเดิมทุกอย่าง)"""
+    if "จางวิท" not in WAKE_WORDS or has_wake(text):
         return text
     m = _APPLE_WAKE_RE.match(text)
-    return f"น้องจาง {text[m.end():].lstrip()}".strip() if m else text
+    return f"จางวิท {text[m.end():].lstrip()}".strip() if m else text
 
 
 def has_wake(text: str) -> bool:
@@ -452,7 +491,7 @@ def has_wake(text: str) -> bool:
 
 
 def strip_wake(text: str) -> str:
-    """ตัดคำปลุกออกก่อนส่งให้ Jev เช่น "น้องจาง เปิดไลน์" → "เปิดไลน์" """
+    """ตัดคำปลุกออกก่อนส่งให้ Jev เช่น "จางวิท เปิดไลน์" → "เปิดไลน์" """
     if WAKE_RE is None:
         return text.strip()
     if WAKE_RE.search(text):
@@ -463,7 +502,7 @@ def strip_wake(text: str) -> str:
 
 
 def only_wake(text: str) -> bool:
-    """เรียกชื่อเฉยๆ ไม่ได้สั่งอะไร เช่น "น้องจาง" / "น้องจางครับ" / "สวัสดีน้องจาง" """
+    """เรียกชื่อเฉยๆ ไม่ได้สั่งอะไร เช่น "จางวิท" / "จางวิทครับ" / "สวัสดีจางวิท" """
     rest = re.sub(r"(ครับผม|ครับ|คับ|ค่ะ|ค่า|คะ|ขา|จ้ะ|จ้า|ฮะ|นะ|หน่อย|สวัสดี|หวัดดี|เฮ้|ฮัลโหล|ว่าไง|อืม|เอ่อ)", "",
                   strip_wake(text))
     return WAKE_RE is not None and has_wake(text) and normalize(rest) == ""
@@ -535,7 +574,7 @@ def speakable(text: str) -> str:
     """ลบ markdown/อีโมจิ ให้เหลือข้อความที่อ่านออกเสียงได้"""
     text = re.sub(r"^\s*(?:[-*•]|\d+\.)\s+", "", text, flags=re.M)
     text = re.sub(r"[*_#`>|~\[\]]", "", text)
-    text = re.sub(r"(?:ค่ะ|คะ)(?=[\s.!?,]|$)", "ครับ", text)   # น้องจางเป็นผู้ชาย (ไม่แตะ "คะแนน")
+    text = re.sub(r"(?:ค่ะ|คะ)(?=[\s.!?,]|$)", "ครับ", text)   # จางวิทเป็นผู้ชาย (ไม่แตะ "คะแนน")
     text = re.sub(r"ดิฉัน", "เรา", text)
     return " ".join(EMOJI_RE.sub("", text).split())
 
@@ -565,7 +604,7 @@ class LocalLLM:
 
     @classmethod
     def url(cls) -> str:
-        return f"http://127.0.0.1:{cls.port}/v1/chat/completions"
+        return LOCAL_LLM_URL or f"http://127.0.0.1:{cls.port}/v1/chat/completions"
 
     @classmethod
     def _is_ours(cls, port: int) -> bool:
@@ -579,6 +618,17 @@ class LocalLLM:
     @classmethod
     def ensure(cls, wait: float = 120) -> None:
         with cls.lock:
+            if IS_WIN:
+                if LOCAL_LLM_URL or cls._is_ours(cls.port):
+                    return
+                for p in (cls.port, 11434, 1234):
+                    if cls._is_ours(p):
+                        cls.port = p
+                        return
+                raise RuntimeError(
+                    "ไม่พบเซิร์ฟเวอร์ LLM ในเครื่อง (เช่น Ollama พอร์ต 11434 หรือ LM Studio พอร์ต 1234) "
+                    "หรือตั้ง LLM_MODE=cloud พร้อมใส่ GOOGLE_API_KEY / OPENROUTER_API_KEY ใน .env"
+                )
             if cls._is_ours(cls.port):
                 return
             while _port_open(cls.port):          # พอร์ตถูกโปรแกรมอื่นใช้อยู่ → เลื่อนไปพอร์ตถัดไป
@@ -613,7 +663,7 @@ def llm_chat(messages: list, model: str = "", tools: list | None = None,
     """เรียก LLM ผ่าน endpoint แบบ OpenAI (ในเครื่อง, OpenRouter หรือ Gemini) คืน message ของคำตอบ
     ถ้าโมเดลหลักคิวเต็ม/ล่ม/ช้าเกิน (429, 5xx, timeout) จะลองโมเดลสำรองให้เอง"""
     if not LLM_KEY:
-        raise RuntimeError("ยังไม่ได้ตั้ง OPENROUTER_API_KEY หรือ GOOGLE_API_KEY")
+        raise RuntimeError("ยังไม่ได้ตั้ง OPENROUTER_API_KEY, TOGETHER_API_KEY หรือ GOOGLE_API_KEY")
     body = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature}
     if tools:
         body |= {"tools": tools, "tool_choice": "auto"}
@@ -621,6 +671,9 @@ def llm_chat(messages: list, model: str = "", tools: list | None = None,
         LocalLLM.ensure()
         # โมเดล 4B มั่วง่ายถ้า temperature สูง (วัดจริง: 0.6 ผิด 3/10, 0.1 ผิด 2/10) และกันพูดวน
         body |= {"temperature": min(temperature, 0.2), "repetition_penalty": 1.05}
+    elif LLM_PROVIDER == "TogetherAI":
+        # ปิด reasoning/thinking ของ Qwen3.5 เพื่อให้ตอบเร็วและไม่กิน max_tokens
+        body |= {"chat_template_kwargs": {"enable_thinking": False}}
     error, statuses = "", []
     url = LocalLLM.url() if LLM_PROVIDER == "ในเครื่อง" else LLM_URL
     for m in dict.fromkeys(x for x in (model or LLM_MODEL, _FALLBACK_MODEL) if x):
@@ -639,12 +692,12 @@ def llm_chat(messages: list, model: str = "", tools: list | None = None,
             continue
         if r.status_code == 200:
             message = r.json()["choices"][0]["message"]
-            if message.get("content"):     # บางโมเดล (Qwen3) แนบความคิดใน <think> มาด้วย → ตัดทิ้ง
-                message["content"] = re.sub(r"<think>.*?</think>", "", message["content"], flags=re.S).strip()
+            if message.get("content"):     # บางโมเดล (Qwen3/3.5) แนบความคิดใน <think> มาด้วย → ตัดทิ้ง
+                message["content"] = re.sub(r"<think>.*?(?:</think>|$)", "", message["content"], flags=re.S).strip()
             return message
         statuses.append(r.status_code)
         error = f"{LLM_PROVIDER} {m} → {r.status_code}: {_api_error_message(r)}"
-        if r.status_code not in (429, 500, 502, 503, 504):
+        if r.status_code not in (400, 404, 429, 500, 502, 503, 504):
             break
         print(f"  ⚠️  {error} — ลองโมเดลสำรอง")
     if statuses and all(s == 429 for s in statuses):
@@ -725,42 +778,177 @@ def step_questions(suffix: str = "", scope: str | None = None,
     }
 
 
+@dataclass
+class _MockChoiceAnswer:
+    choice: str
+    confidence: float
+    probabilities: dict
+
+
+@dataclass
+class _MockNoulAnswer:
+    noul: float
+
+
+@dataclass
+class _MockScoreAnswer:
+    score: float
+    confidence: float
+    probabilities: dict
+
+
+@dataclass
+class _MockUsage:
+    input_tokens: int
+
+
+@dataclass
+class _MockResponse:
+    model: str
+    usage: _MockUsage
+    choices: dict
+    nouls: dict
+    scores: dict
+    answers: dict
+
+
+def _llm_system_one(state: dict, questions: dict) -> _MockResponse:
+    """จำลองการทำงานของ Jev (Speculative Fan-out) ด้วย LLM (Together AI / OpenRouter / Gemini / Ollama)
+    ถามทุกคำถามในครั้งเดียวและรับผลลัพธ์เป็น JSON พร้อมค่า confidence"""
+    q_desc = {}
+    for name, q in questions.items():
+        if isinstance(q, Choice):
+            q_desc[name] = {
+                "type": "choice",
+                "instructions": q.instructions,
+                "options": q.criteria,
+                "return_format": {"choice": "exact_option_key", "confidence": 0.95},
+            }
+        elif isinstance(q, Noul):
+            q_desc[name] = {
+                "type": "boolean_probability",
+                "instructions": q.instructions,
+                "criteria": q.criteria,
+                "return_format": {"probability": 0.05},
+            }
+        else:
+            q_desc[name] = {
+                "type": "score_index",
+                "instructions": q.instructions,
+                "levels": {str(i): desc for i, desc in enumerate(q.criteria)},
+                "return_format": {"index": 4, "confidence": 0.95},
+            }
+
+    sys_prompt = (
+        "You are a fast, accurate System-1 decision classifier (replacing Jev) for a Thai voice assistant (จางวิท). "
+        "Given the input `state` and `questions`, evaluate EVERY question in `questions` simultaneously and return ONLY a single valid JSON object "
+        "(no markdown fences, no explanation). For each question key:\n"
+        "- If type == 'choice': return {\"choice\": \"<exact key from options>\", \"confidence\": <float 0.0 to 1.0>}. "
+        "Pay close attention to Thai keywords in parentheses.\n"
+        "- If type == 'boolean_probability': return {\"probability\": <float 0.0 to 1.0 that the condition is true>}.\n"
+        "- If type == 'score_index': return {\"index\": <integer 0 to N-1>, \"confidence\": <float 0.0 to 1.0>}.\n"
+        "Be decisive: when the user's intent matches an option, give high confidence (0.85 - 0.99)."
+    )
+    user_prompt = json.dumps({"state": state, "questions": q_desc}, ensure_ascii=False)
+    messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}]
+    msg = llm_chat(messages, model=LLM_MODEL, max_tokens=1024, temperature=0.0, timeout=15)
+    raw = (msg.get("content") or "{}").strip()
+    m = re.search(r"\{.*\}", raw, flags=re.S)
+    try:
+        parsed = json.loads(m.group(0) if m else raw)
+    except Exception:
+        parsed = {}
+
+    choices, nouls, scores, answers = {}, {}, {}, {}
+    for name, q in questions.items():
+        ans = parsed.get(name) if isinstance(parsed, dict) else {}
+        if not isinstance(ans, dict):
+            ans = {}
+        if isinstance(q, Choice):
+            keys = list(q.criteria.keys())
+            default_k = "none" if "none" in q.criteria else keys[0]
+            ch = str(ans.get("choice", default_k))
+            if ch not in q.criteria:
+                ch = next((k for k in keys if k.lower() == ch.lower()), default_k)
+            conf = float(ans.get("confidence", 0.9 if ch != default_k else 0.8))
+            conf = max(0.0, min(1.0, conf))
+            rem = max(0.0, 1.0 - conf)
+            probs = {k: (conf if k == ch else rem / max(1, len(keys) - 1)) for k in keys}
+            # เผื่อคำสั่งซ้อน (compound): ให้ทุกแอป/คำสั่งมีโอกาส >= 0.02 ใน likely() ถ้ารอบแรกเป็นคำสั่งซ้อน
+            if len(keys) > 2:
+                for k in keys:
+                    if k != ch:
+                        probs[k] = max(probs[k], 0.02)
+            ca = _MockChoiceAnswer(choice=ch, confidence=conf, probabilities=probs)
+            choices[name] = answers[name] = ca
+        elif isinstance(q, Noul):
+            p = float(ans.get("probability", ans.get("noul", 0.0)))
+            p = max(0.0, min(1.0, p))
+            na = _MockNoulAnswer(noul=p)
+            nouls[name] = answers[name] = na
+        else:
+            n_lvl = len(q.criteria)
+            idx = ans.get("index", 4)
+            try:
+                idx = max(0, min(n_lvl - 1, int(idx)))
+            except (ValueError, TypeError):
+                idx = 4
+            conf = max(0.0, min(1.0, float(ans.get("confidence", 0.9))))
+            probs = {i: (conf if i == idx else (1.0 - conf) / max(1, n_lvl - 1)) for i in range(n_lvl)}
+            sa = _MockScoreAnswer(score=float(idx), confidence=conf, probabilities=probs)
+            scores[name] = answers[name] = sa
+
+    est_tokens = (len(sys_prompt) + len(user_prompt)) // 3
+    model_label = f"{LLM_PROVIDER}:{LOCAL_LLM_MODEL if LLM_PROVIDER == 'ในเครื่อง' else LLM_MODEL}"
+    return _MockResponse(model=model_label, usage=_MockUsage(input_tokens=est_tokens),
+                         choices=choices, nouls=nouls, scores=scores, answers=answers)
+
+
 class Jev:
     def __init__(self):
-        if not TYPESAFE_API_KEY:
-            raise JevError("ยังไม่ได้ใส่ TYPESAFE_API_KEY ใน .env (คัดลอกจาก .env.example แล้วใส่คีย์)")
-        self.client = TypeSafeClient(api_key=TYPESAFE_API_KEY, model=JEV_MODEL, timeout=8.0,
-                                     retry=RetryPolicy(max_retries=1))
+        self.use_llm = not bool(TYPESAFE_API_KEY)
+        if not self.use_llm and TypeSafeClient is not None:
+            self.client = TypeSafeClient(api_key=TYPESAFE_API_KEY, model=JEV_MODEL, timeout=8.0,
+                                         retry=RetryPolicy(max_retries=1))
+        else:
+            self.use_llm = True
+            self.client = None
+            if not LLM_KEY:
+                raise JevError(
+                    "ยังไม่ได้ใส่คีย์ตัดสินใจ: ตั้งค่า TOGETHER_API_KEY, OPENROUTER_API_KEY, GOOGLE_API_KEY "
+                    "(หรือ TYPESAFE_API_KEY) ในไฟล์ .env ก่อนใช้งาน"
+                )
 
     @staticmethod
     def state(text: str, extra: str = "") -> dict:
         return {
             "transcript": text,
             "language": "th",
-            "context": "Thai speech-to-text transcript captured by น้องจาง (Nong Jang), an always-listening "
-                       "voice assistant that controls a Mac and can browse the web. Speech recognition may "
+            "context": "Thai speech-to-text transcript captured by จางวิท (Jangwit / Jarvis), an always-listening "
+                       "voice assistant that controls a PC/Mac and can browse the web. Speech recognition may "
                        "misspell words or write English app names in Thai script. The speaker may be talking "
                        "to the assistant or to someone else." + (f" {extra}" if extra else ""),
         }
 
     def ask(self, tag: str, text: str, questions: dict, extra: str = ""):
-        """เรียก Jev หนึ่งครั้ง + print trace (เวลา, คำตอบ, confidence)"""
+        """เรียก Jev (หรือ LLM แทน Jev) หนึ่งครั้ง + print trace (เวลา, คำตอบ, confidence)"""
         t0 = time.perf_counter()
+        st = self.state(text, extra)
         try:
-            resp = self.client.system_one(state=self.state(text, extra), questions=questions)
-        except TypeSafeError as e:
-            raise JevError(f"เรียก Jev ไม่สำเร็จ: {e}") from e
+            resp = _llm_system_one(st, questions) if self.use_llm else self.client.system_one(state=st, questions=questions)
+        except Exception as e:
+            raise JevError(f"เรียกตัวตัดสินใจไม่สำเร็จ: {e}") from e
         ms = (time.perf_counter() - t0) * 1000
         print_trace(tag, resp, ms)
         return resp, ms
 
     def ask_state(self, tag: str, state: dict, questions: dict):
-        """เรียก Jev ด้วย state ที่กำหนดเอง (เช่น เอเจนต์คุมคอมส่งรายการบนจอ) + print trace"""
+        """เรียก Jev (หรือ LLM แทน Jev) ด้วย state ที่กำหนดเอง (เช่น เอเจนต์คุมคอมส่งรายการบนจอ) + print trace"""
         t0 = time.perf_counter()
         try:
-            resp = self.client.system_one(state=state, questions=questions)
-        except TypeSafeError as e:
-            raise JevError(f"เรียก Jev ไม่สำเร็จ: {e}") from e
+            resp = _llm_system_one(state, questions) if self.use_llm else self.client.system_one(state=state, questions=questions)
+        except Exception as e:
+            raise JevError(f"เรียกตัวตัดสินใจไม่สำเร็จ: {e}") from e
         print_trace(tag, resp, (time.perf_counter() - t0) * 1000)
         return resp
 
@@ -847,12 +1035,14 @@ def print_trace(tag: str, resp, ms: float) -> None:
     clock = datetime.now().strftime("%H:%M:%S")
     tokens = resp.usage.input_tokens or 0
     print(f"  ┌─ Jev {tag} · {clock} · {ms:.0f} ms · {resp.model} · {tokens} tokens")
+    choice_types = (ChoiceAnswer, _MockChoiceAnswer) if ChoiceAnswer is not None else (_MockChoiceAnswer,)
+    noul_types = (NoulAnswer, _MockNoulAnswer) if NoulAnswer is not None else (_MockNoulAnswer,)
     for name, a in resp.answers.items():
-        if isinstance(a, ChoiceAnswer):
+        if isinstance(a, choice_types):
             value, conf = a.choice, a.confidence
             runner = sorted(a.probabilities.items(), key=lambda kv: -kv[1])[1:2]
             extra = f"  (รอง: {runner[0][0]} {runner[0][1]:.2f})" if runner else ""
-        elif isinstance(a, NoulAnswer):  # Noul ไม่มี confidence ให้ → ใช้ระยะห่างจาก 0.5
+        elif isinstance(a, noul_types):  # Noul ไม่มี confidence ให้ → ใช้ระยะห่างจาก 0.5
             value, conf, extra = f"{'ใช่' if a.noul >= 0.5 else 'ไม่ใช่'} p={a.noul:.2f}", max(a.noul, 1 - a.noul), ""
         else:                            # ScoreAnswer
             level = max(a.probabilities, key=a.probabilities.get)
@@ -899,15 +1089,151 @@ class Plan:
     func: object = None                                    # งานที่ทำในโปรแกรมเอง (แทนคำสั่ง shell) คืน True = สำเร็จ
 
 
-# ── Chrome ของผู้ใช้ vs Chrome ของน้องจาง ──────────────────────────────────────────────────────
+# ── Chrome ของผู้ใช้ vs Chrome ของจางวิท ──────────────────────────────────────────────────────
 # เอเจนต์เว็บเปิด Chrome อีกตัวด้วยโปรไฟล์แยก (.browser-profile) เพราะ Chrome ไม่ยอมให้คุมโปรไฟล์หลักผ่าน CDP
-# สองตัวเป็นแอปเดียวกัน → "open -a Google Chrome" / "open <ลิงก์>" อาจไปโผล่ในตัวของน้องจาง (ไม่มีบุ๊กมาร์ก/ล็อกอินของผู้ใช้)
-# open -n = เปิดโปรเซสใหม่ด้วยโปรไฟล์ปกติ → ถ้า Chrome ของผู้ใช้เปิดอยู่ มันส่งต่อไปให้ตัวนั้นเอง (ไม่แตะตัวของน้องจาง)
+# สองตัวเป็นแอปเดียวกัน → "open -a Google Chrome" / "open <ลิงก์>" อาจไปโผล่ในตัวของจางวิท (ไม่มีบุ๊กมาร์ก/ล็อกอินของผู้ใช้)
+# open -n = เปิดโปรเซสใหม่ด้วยโปรไฟล์ปกติ → ถ้า Chrome ของผู้ใช้เปิดอยู่ มันส่งต่อไปให้ตัวนั้นเอง (ไม่แตะตัวของจางวิท)
 CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+# แมปชื่อแอปมาตรฐาน (ที่ใช้ใน APPS และ EVAL_CASES) เข้ากับคำสั่งเปิดและชื่อโปรเซสบน Windows 11
+WIN_APP_LAUNCH = {
+    "Spotify":            ["cmd", "/c", "start", "", "spotify:"],
+    "Safari":             ["cmd", "/c", "start", "", "msedge"],
+    "LINE":               ["cmd", "/c", "start", "", "line:"],
+    "Slack":              ["cmd", "/c", "start", "", "slack:"],
+    "Visual Studio Code": ["cmd", "/c", "start", "", "code"],
+    "Terminal":           ["cmd", "/c", "start", "", "wt"],
+    "Finder":             ["explorer.exe"],
+    "Notes":              ["notepad.exe"],
+    "Calendar":           ["cmd", "/c", "start", "", "outlookcal:"],
+    "Mail":               ["cmd", "/c", "start", "", "mailto:"],
+    "Calculator":         ["calc.exe"],
+    "System Settings":    ["cmd", "/c", "start", "", "ms-settings:"],
+}
+WIN_APP_EXES = {
+    "Spotify":            "Spotify.exe",
+    "Google Chrome":      "chrome.exe",
+    "Safari":             "msedge.exe",
+    "LINE":               "LINE.exe",
+    "Slack":              "slack.exe",
+    "Visual Studio Code": "Code.exe",
+    "Terminal":           "WindowsTerminal.exe",
+    "Finder":             "explorer.exe",
+    "Notes":              "notepad.exe",
+    "Calendar":           "HxCalendarAppImm.exe",
+    "Mail":               "olk.exe",
+    "Calculator":         "CalculatorApp.exe",
+    "System Settings":    "SystemSettings.exe",
+}
+
+
+def _win_endpoint_volume():
+    """ดึง IAudioEndpointVolume ของลำโพงหลักบน Windows ผ่าน pycaw"""
+    import comtypes
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    comtypes.CoInitialize()
+    devices = AudioUtilities.GetSpeakers()
+    interface = devices.Activate(IAudioEndpointVolume._iid_, comtypes.CLSCTX_ALL, None)
+    return comtypes.cast(interface, comtypes.POINTER(IAudioEndpointVolume))
+
+
+def _win_set_volume(vol: int, mute: bool = False) -> bool:
+    try:
+        ep = _win_endpoint_volume()
+        if mute:
+            ep.SetMute(1, None)
+        else:
+            ep.SetMute(0, None)
+            ep.SetMasterVolumeLevelScalar(max(0.0, min(1.0, vol / 100.0)), None)
+        return True
+    except Exception:
+        # สำรองด้วยปุ่มคีย์บอร์ดมีเดียของ Windows
+        try:
+            import ctypes
+            vk = 0xAD if mute else 0xAF
+            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+            return True
+        except Exception:
+            return False
+
+
+def _win_media_key(vk: int) -> bool:
+    """กดปุ่มมีเดียบน Windows (0xB3=Play/Pause, 0xB0=Next, 0xB1=Prev)"""
+    try:
+        import ctypes
+        ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+        ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _win_toggle_dark_mode() -> bool:
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
+            try:
+                cur, _ = winreg.QueryValueEx(k, "AppsUseLightTheme")
+            except OSError:
+                cur = 1
+            new_val = 0 if cur else 1
+            winreg.SetValueEx(k, "AppsUseLightTheme", 0, winreg.REG_DWORD, new_val)
+            winreg.SetValueEx(k, "SystemUsesLightTheme", 0, winreg.REG_DWORD, new_val)
+        return True
+    except Exception:
+        return False
+
+
+def _win_screenshot(path: Path) -> bool:
+    try:
+        from PIL import ImageGrab
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ImageGrab.grab().save(str(path))
+        return True
+    except Exception:
+        return False
+
+
+def _win_open_app(app: str) -> bool:
+    if app in WIN_SHORTCUTS and WIN_SHORTCUTS[app].exists():
+        try:
+            os.startfile(str(WIN_SHORTCUTS[app]))
+            return True
+        except OSError:
+            pass
+    for d in [
+        Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Microsoft/Windows/Start Menu/Programs",
+        Path(os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))) / "Microsoft/Windows/Start Menu/Programs",
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "Programs",
+    ]:
+        if d.is_dir():
+            matches = list(d.rglob(f"*{app}*.lnk")) + list(d.rglob(f"*{app}*.exe"))
+            if matches:
+                try:
+                    os.startfile(str(matches[0]))
+                    return True
+                except OSError:
+                    pass
+    if app in WIN_APP_LAUNCH:
+        r = subprocess.run(WIN_APP_LAUNCH[app], capture_output=True, text=True, timeout=10)
+        return r.returncode == 0
+    r = subprocess.run(["cmd", "/c", "start", "", app], capture_output=True, text=True, timeout=10)
+    return r.returncode == 0
 
 
 def _default_browser() -> str:
-    """bundle id ของเบราว์เซอร์หลัก (อ่านจากการตั้งค่า LaunchServices)"""
+    """bundle id หรือ prog id ของเบราว์เซอร์หลัก"""
+    if IS_WIN:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice") as k:
+                prog_id, _ = winreg.QueryValueEx(k, "ProgId")
+                return "com.google.chrome" if "chrome" in str(prog_id).lower() else str(prog_id).lower()
+        except Exception:
+            return "com.google.chrome"
     import plistlib
     path = Path.home() / "Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist"
     try:
@@ -920,7 +1246,13 @@ def _default_browser() -> str:
 
 
 def open_url_cmd(url: str) -> list[str]:
-    """เปิดลิงก์ในเบราว์เซอร์ประจำของผู้ใช้ (ถ้าเป็น Chrome ต้องไม่ไปโผล่ในหน้าต่างของน้องจาง)"""
+    """เปิดลิงก์ในเบราว์เซอร์ประจำของผู้ใช้ (ถ้าเป็น Chrome ต้องไม่ไปโผล่ในหน้าต่างของจางวิท)"""
+    if IS_WIN:
+        from browser_agent import CHROME
+        if _default_browser() == "com.google.chrome" and CHROME.exists():
+            from computer_agent import user_chrome_cmd
+            return user_chrome_cmd(url)
+        return ["cmd", "/c", "start", "", url]
     if _default_browser() == "com.google.chrome" and Path(CHROME_BIN).exists():
         from computer_agent import user_chrome_cmd
         return user_chrome_cmd(url)
@@ -929,6 +1261,14 @@ def open_url_cmd(url: str) -> list[str]:
 
 def user_chrome_pids() -> list[int]:
     """โปรเซสหลักของ Chrome ที่ผู้ใช้ใช้เอง (ไม่นับตัวของเอเจนต์เว็บ)"""
+    if IS_WIN:
+        ps = (
+            "Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -notlike '*--type=*' -and $_.CommandLine -notlike '*{BROWSER_PROFILE.name}*' }} | "
+            "Select-Object -ExpandProperty ProcessId"
+        )
+        out = read_cmd(["powershell", "-NoProfile", "-Command", ps])
+        return [int(x) for x in out.split() if x.isdigit()]
     out = read_cmd(["ps", "-axo", "pid=,command="])
     pids = []
     for line in out.splitlines():
@@ -939,7 +1279,14 @@ def user_chrome_pids() -> list[int]:
 
 
 def quit_user_chrome() -> bool:
-    """ปิดเฉพาะ Chrome ของผู้ใช้ (ส่งคำสั่ง quit ปกติ เหมือนกด cmd+Q) ไม่แตะตัวของน้องจาง"""
+    """ปิดเฉพาะ Chrome ของผู้ใช้ (ส่งคำสั่ง quit ปกติ) ไม่แตะตัวของจางวิท"""
+    if IS_WIN:
+        pids = user_chrome_pids()
+        if not pids:
+            return False
+        for pid in pids:
+            subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
+        return True
     import AppKit
     ok = False
     for pid in user_chrome_pids():
@@ -957,29 +1304,50 @@ def read_cmd(cmd: list[str]) -> str:
 
 
 def app_running(app: str) -> bool:
+    if IS_WIN:
+        exe = WIN_APP_EXES.get(app, f"{app}.exe")
+        out = read_cmd(["tasklist", "/FI", f"IMAGENAME eq {exe}", "/NH"])
+        return exe.lower() in out.lower()
     # เช็คแบบนี้ไม่ส่ง Apple Event จึงไม่ต้องขอสิทธิ์ และไม่เปิดแอปขึ้นมาเอง
     return read_cmd(osa(f'application "{app}" is running')) == "true"
 
 
 def app_installed(app: str) -> bool:
+    if IS_WIN:
+        if app in WIN_SHORTCUTS:
+            return True
+        if app == "Spotify":
+            return any((Path(os.environ.get("APPDATA", "")) / "Spotify/Spotify.exe").exists() or
+                       "spotify" in p.stem.lower() for p in WIN_SHORTCUTS.values())
+        return True
     dirs = ["/Applications", "/System/Applications", "/System/Applications/Utilities",
             "/System/Library/CoreServices", str(Path.home() / "Applications")]
     return any(Path(d, f"{app}.app").exists() for d in dirs)
 
 
 def current_volume() -> int | None:
+    if IS_WIN:
+        try:
+            ep = _win_endpoint_volume()
+            return round(float(ep.GetMasterVolumeLevelScalar()) * 100)
+        except Exception:
+            return 50
     out = read_cmd(osa("output volume of (get volume settings)"))
     return int(out) if out.isdigit() else None   # บางอุปกรณ์ (HDMI) ได้ "missing value"
 
 
 def host_app() -> str:
     """แอปที่รัน Jarvis อยู่ (ห้ามปิด ไม่งั้น Jarvis ตายไปด้วย)"""
+    if IS_WIN:
+        if os.getenv("WT_SESSION"):
+            return "Terminal"
+        return {"vscode": "Visual Studio Code"}.get(os.getenv("TERM_PROGRAM", ""), "")
     return {"Apple_Terminal": "Terminal", "vscode": "Visual Studio Code",
             "iTerm.app": "iTerm"}.get(os.getenv("TERM_PROGRAM", ""), "")
 
 
 def music_player() -> str:
-    """ใช้ Spotify ถ้ามี ไม่งั้นใช้ Music ของ Apple (สคริปต์อ้าง Spotify จะ compile ไม่ผ่านถ้าไม่ได้ติดตั้ง)"""
+    """ใช้ Spotify ถ้ามี ไม่งั้นใช้ Music ของ Apple"""
     return "Spotify" if app_installed("Spotify") else "Music"
 
 
@@ -990,22 +1358,34 @@ def make_plan(step: Step) -> Plan:
 
     if a == "open_app" and app in SITES:        # เว็บยอดนิยม → เปิดในเบราว์เซอร์หลักตรงๆ
         return Plan(pick(a, app=name), [open_url_cmd(SITES[app][2])])
-    if a == "open_app" and app == "Google Chrome":    # Chrome ตัวที่ผู้ใช้ใช้ประจำ ไม่ใช่ตัวของน้องจาง
+    if a == "open_app" and app == "Google Chrome":    # Chrome ตัวที่ผู้ใช้ใช้ประจำ ไม่ใช่ตัวของจางวิท
         from computer_agent import user_chrome_cmd
         return Plan(pick(a, app=name), [user_chrome_cmd()], fail_reply=f"เปิด{name}ไม่ได้ครับ")
     if a == "open_app":
+        if IS_WIN:
+            fn = lambda target=app: _win_open_app(target)
+            fn.__name__ = f"open_win_app({app})"
+            return Plan(pick(a, app=name), func=fn, fail_reply=f"ไม่พบแอป{name}ในเครื่องครับ")
         return Plan(pick(a, app=name), [["open", "-a", app]], fail_reply=f"ไม่พบแอป{name}ในเครื่องครับ")
     if a == "quit_app" and app in SITES:
         return Plan(f"{name}เป็นเว็บ ปิดแท็บเองได้เลยครับ")
     if a == "quit_app":
         if app == host_app():
             return Plan(f"ปิด{name}ไม่ได้ครับ เพราะผมทำงานอยู่ในนั้น")
-        if app == "Finder":   # Finder ปิดแล้วจะเปิดตัวเองใหม่ → ปิดหน้าต่างแทน
+        if app == "Finder":   # Finder/Explorer ปิดแล้วจะปิดแถบงาน → ปิดเฉพาะหน้าต่างแทน
+            if IS_WIN:
+                ps = "(New-Object -ComObject Shell.Application).Windows() | ForEach-Object { $_.Quit() }"
+                return Plan("ปิดหน้าต่างไฟน์เดอร์ให้แล้วครับ", [["powershell", "-NoProfile", "-Command", ps]])
             return Plan("ปิดหน้าต่างไฟน์เดอร์ให้แล้วครับ", [osa('tell application "Finder" to close every window')])
-        if app == "Google Chrome":                     # ปิดเฉพาะตัวของผู้ใช้ (ตัวของน้องจางปิดเองตอนเลิกใช้)
+        if app == "Google Chrome":                     # ปิดเฉพาะตัวของผู้ใช้ (ตัวของจางวิทปิดเองตอนเลิกใช้)
             if not user_chrome_pids():
                 return Plan(f"{name}ไม่ได้เปิดอยู่ครับ")
             return Plan(pick(a, app=name), func=quit_user_chrome, fail_reply=f"{name}ยังไม่ปิดครับ")
+        if IS_WIN:
+            exe = WIN_APP_EXES.get(app, f"{app}.exe")
+            if not app_running(app):
+                return Plan(f"{name}ไม่ได้เปิดอยู่ครับ")
+            return Plan(pick(a, app=name), [["taskkill", "/IM", exe]], fail_reply=f"{name}ยังไม่ปิดครับ")
         if not app_running(app):
             return Plan(f"{name}ไม่ได้เปิดอยู่ครับ")
         # รอแค่ 5 วิ: ถ้าแอปถามยืนยัน (เช่น มีไฟล์ยังไม่เซฟ) จะได้ไม่ค้างทั้งระบบ
@@ -1018,16 +1398,37 @@ def make_plan(step: Step) -> Plan:
         if now is None:
             return Plan("อุปกรณ์เสียงตอนนี้ปรับระดับไม่ได้ครับ")
         new = min(100, now + VOLUME_STEP) if a == "volume_up" else max(0, now - VOLUME_STEP)
+        if IS_WIN:
+            fn = lambda v=new: _win_set_volume(v, mute=False)
+            fn.__name__ = f"set_volume({new}%)"
+            return Plan(pick(a, vol=new), func=fn)
         return Plan(pick(a, vol=new), [osa(f"set volume output volume {new} without output muted")])
     if a == "volume_mute":
+        if IS_WIN:
+            fn = lambda: _win_set_volume(0, mute=True)
+            fn.__name__ = "mute_volume"
+            return Plan(pick(a), func=fn, speak_first=True)
         return Plan(pick(a), [osa("set volume with output muted")], speak_first=True)
     if a == "volume_set":
         vol = max(0, min(100, step.volume if step.volume is not None else 50))
         if vol == 0:
+            if IS_WIN:
+                fn = lambda: _win_set_volume(0, mute=True)
+                fn.__name__ = "mute_volume"
+                return Plan(pick("volume_mute"), func=fn, speak_first=True)
             return Plan(pick("volume_mute"), [osa("set volume with output muted")], speak_first=True)
+        if IS_WIN:
+            fn = lambda v=vol: _win_set_volume(v, mute=False)
+            fn.__name__ = f"set_volume({vol}%)"
+            return Plan(pick(a, vol=vol), func=fn)
         return Plan(pick(a, vol=vol), [osa(f"set volume output volume {vol} without output muted")])
 
     if a.startswith("music_"):
+        if IS_WIN:
+            vk = {"music_play": 0xB3, "music_pause": 0xB3, "music_next": 0xB0, "music_previous": 0xB1}[a]
+            fn = lambda k=vk: _win_media_key(k)
+            fn.__name__ = a
+            return Plan(pick(a), func=fn)
         player = music_player()
         verb = {"music_play": "play", "music_pause": "pause",
                 "music_next": "next track", "music_previous": "previous track"}[a]
@@ -1042,9 +1443,13 @@ def make_plan(step: Step) -> Plan:
         return Plan(pick(a), [osa(f'tell application "{player}" to {verb}')])
 
     if a == "dark_mode":
+        if IS_WIN:
+            return Plan(pick(a), func=_win_toggle_dark_mode)
         return Plan(pick(a), [osa('tell application "System Events" to tell appearance preferences '
                                   'to set dark mode to not dark mode')])
     if a == "lock_screen":
+        if IS_WIN:
+            return Plan(pick(a), [["rundll32.exe", "user32.dll,LockWorkStation"]], speak_first=True)
         # 1) ล็อกทันทีผ่าน login.framework ไม่ต้องขอสิทธิ์ (วิธีเดียวกับ rgcr/m-cli, MIT)
         # 2) Ctrl+Cmd+Q ด้วย key code 12 (ต้องมีสิทธิ์ Accessibility)  3) ปิดจอ (ล็อกถ้าตั้งให้ขอรหัสทันที)
         lock = ("import ctypes; ctypes.CDLL('/System/Library/PrivateFrameworks/login.framework/"
@@ -1053,9 +1458,15 @@ def make_plan(step: Step) -> Plan:
                               osa('tell application "System Events" to key code 12 using {control down, command down}'),
                               ["pmset", "displaysleepnow"]], speak_first=True)
     if a == "sleep":
+        if IS_WIN:
+            return Plan(pick(a), [["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]], speak_first=True)
         return Plan(pick(a), [["pmset", "sleepnow"]], speak_first=True)
     if a == "screenshot":
         path = Path.home() / "Desktop" / f"Jarvis-{datetime.now():%Y%m%d-%H%M%S}.png"
+        if IS_WIN:
+            fn = lambda p=path: _win_screenshot(p)
+            fn.__name__ = f"screenshot({path.name})"
+            return Plan(pick(a), func=fn)
         return Plan(pick(a), [["screencapture", "-x", str(path)]])
     if a == "tell_time":
         return Plan(thai_time())
@@ -1094,7 +1505,7 @@ def execute(plan: Plan, dry_run: bool) -> bool:
             print(f"     {r.stderr.strip()[:200]}")
             if re.search(r"-1743|-1719|-25211|\(1002\)|Not authorized|assistive", r.stderr):
                 print("     🔐 macOS ยังไม่ให้สิทธิ์: System Settings › Privacy & Security › Automation / Accessibility "
-                      "แล้วเปิดให้แอปเทอร์มินัลที่รันน้องจาง")
+                      "แล้วเปิดให้แอปเทอร์มินัลที่รันจางวิท")
     return dry_run or not plan.cmds
 
 
@@ -1114,7 +1525,7 @@ def save_utterance(audio: np.ndarray, text: str) -> None:
 # 6) สมองกลาง: ข้อความ → Jev → สั่งเครื่อง / ถาม LLM / ข้าม → พูดตอบ
 # ════════════════════════════════════════════════════════════════════════════
 
-LLM_SYSTEM_PROMPT = """คุณคือ "น้องจาง" ผู้ช่วยเสียงบนเครื่อง Mac ของผู้ใช้ เป็นผู้ชาย คุยกับผู้ใช้เหมือนเพื่อนสนิท เป็นกันเอง ตอบไว
+LLM_SYSTEM_PROMPT = """คุณคือ "จางวิท" ผู้ช่วยเสียงบนเครื่องคอมพิวเตอร์ของผู้ใช้ เป็นผู้ชาย คุยกับผู้ใช้เหมือนเพื่อนสนิท เป็นกันเอง ตอบไว
 - ตอบสั้นมาก 1-2 ประโยค เหมือนคุยโทรศัพท์กับเพื่อน ตอบตรงคำถามก่อนเสมอ
 - แทนตัวเองว่า "เรา" เท่านั้น (ห้ามใช้ "ฉัน" "ดิฉัน" "ผม") เรียกผู้ใช้ว่า "นาย" หรือไม่ต้องใช้สรรพนาม
 - ลงท้ายด้วย "นะ" "อะ" "ครับ" ตามธรรมชาติ สุภาพแบบเพื่อน ห้ามใช้คำหยาบ ห้ามใช้ "กู" "มึง"
@@ -1124,8 +1535,8 @@ LLM_SYSTEM_PROMPT = """คุณคือ "น้องจาง" ผู้ช�
 - ข้อความของผู้ใช้มาจากการถอดเสียง อาจสะกดผิด (เช่น ร/ล สลับกัน) ให้เดาความหมายที่น่าจะเป็น
 - ถ้าไม่แน่ใจข้อเท็จจริง บอกตรงๆ ว่าไม่แน่ใจ ห้ามเดาเรื่องยา สุขภาพ เงิน หรือตัวเลขสำคัญ
 - ตอนคุยแบบนี้เรามองไม่เห็นจอและยังไม่ได้ทำอะไรบนเครื่อง ห้ามแต่งว่าเห็นอะไรบนจอหรือทำอะไรให้แล้ว
-  ถ้าถามว่าทำได้ไหม ให้บอกว่าทำได้และบอกวิธีสั่ง เช่น "น้องจาง อ่านจอให้ฟังหน่อย" "น้องจาง เปิดสปอติฟาย"
-  "น้องจาง หาห้องพักแถวเมืองทองให้หน่อย" "น้องจาง คลิกปุ่มบันทึกให้หน่อย"
+  ถ้าถามว่าทำได้ไหม ให้บอกว่าทำได้และบอกวิธีสั่ง เช่น "จางวิท อ่านจอให้ฟังหน่อย" "จางวิท เปิดสปอติฟาย"
+  "จางวิท หาห้องพักแถวเมืองทองให้หน่อย" "จางวิท คลิกปุ่มบันทึกให้หน่อย"
 ตอนนี้คือ {now}"""
 
 
@@ -1175,7 +1586,7 @@ class Assistant:
         return d
 
     def _handle(self, text: str, second_opinion=None) -> None:
-        if only_wake(text):                # เรียก "น้องจาง" เฉยๆ → ขานรับแล้วรอฟังคำสั่ง
+        if only_wake(text):                # เรียก "จางวิท" เฉยๆ → ขานรับแล้วรอฟังคำสั่ง
             self.speaker.say(pick("wake"))
             self.last_active = time.monotonic()
             return
@@ -1183,7 +1594,7 @@ class Assistant:
         text = strip_wake(text)
         if self.history and time.monotonic() - self.last_active > HISTORY_IDLE_SEC:
             self.history.clear()
-        # บริบทการคุย: ถ้าเพิ่งคุยกันอยู่ บอก Jev ว่าน้องจางเพิ่งพูดอะไรไป (ผู้ใช้อาจกำลังตอบกลับ)
+        # บริบทการคุย: ถ้าเพิ่งคุยกันอยู่ บอก Jev ว่าจางวิทเพิ่งพูดอะไรไป (ผู้ใช้อาจกำลังตอบกลับ)
         chatting = self.history and time.monotonic() - self.last_active < FOLLOWUP_SEC
         context = f"The assistant just said: \"{self.history[-1][1][:120]}\". The speaker may be replying to it." \
             if chatting else ""
@@ -1236,7 +1647,7 @@ class Assistant:
             self._chat_reply(text, early, early_text)
             return
         if d.category == "noise":
-            print("  🔇 ไม่ได้พูดกับน้องจาง — ข้าม")
+            print("  🔇 ไม่ได้พูดกับจางวิท — ข้าม")
             return
         # confidence gate: ไม่มั่นใจ → ขอพูดใหม่, พลาด 2 ครั้งติด → ข้าม
         if d.conf < need and not woke:     # ไม่ได้เรียกชื่อ (ช่วงคุยต่อ) แล้วยังไม่ชัด → น่าจะไม่ได้คุยกับเรา
@@ -1449,8 +1860,103 @@ def say_text(text: str) -> str:
     return f"[[pbas {TTS_PITCH}]] {text}" if TTS_PITCH else text
 
 
+def _edge_tts_params() -> tuple[str, str, str]:
+    """แปลงค่า TTS_VOICE, TTS_RATE, TTS_PITCH ให้เข้ากับ edge-tts บน Windows"""
+    voice = TTS_VOICE
+    if voice.lower() == "kanya" or not voice:
+        voice = "th-TH-PremwadeeNeural" if voice.lower() == "kanya" else "th-TH-NiwatNeural"
+    elif "-" not in voice:
+        voice = "th-TH-NiwatNeural"
+    # เทียบจากค่ามาตรฐาน ~180 wpm (TTS_RATE=230 → +25%)
+    pct = max(-50, min(100, round((TTS_RATE - 180) / 180 * 100)))
+    rate_str = f"{pct:+d}%"
+    pitch_str = "+0Hz"
+    if TTS_PITCH:
+        p = TTS_PITCH.strip()
+        if p.endswith("Hz"):
+            pitch_str = p if p.startswith(("+", "-")) else f"-{p}"
+        elif p.lstrip("+-").isdigit():
+            val = int(p)
+            # ถ้าใส่ค่าแบบ macOS Kanya (เช่น 28) และใช้เสียงผู้หญิง ให้กดทุ้มลง
+            if 0 < val <= 40 and "Premwadee" in voice:
+                pitch_str = "-25Hz"
+            elif val < 0:
+                pitch_str = f"{val}Hz"
+    return voice, rate_str, pitch_str
+
+
+_SHUTTING_DOWN = threading.Event()
+
+
+def _win_synthesize(text: str) -> np.ndarray | None:
+    """สังเคราะห์เสียงพูดภาษาไทยบน Windows ด้วย edge-tts (แปลง MP3 → int16 16 kHz mono ด้วย miniaudio)
+    และมีระบบสำรองเป็น Windows SAPI Offline กรณีไม่มีอินเทอร์เน็ต"""
+    if _SHUTTING_DOWN.is_set() or sys.is_finalizing():
+        return None
+    import asyncio
+    import shutil
+    try:
+        import edge_tts
+        import miniaudio
+        voice, rate_str, pitch_str = _edge_tts_params()
+
+        async def _fetch() -> bytes:
+            comm = edge_tts.Communicate(text, voice, rate=rate_str, pitch=pitch_str)
+            chunks = []
+            async for chunk in comm.stream():
+                if _SHUTTING_DOWN.is_set() or sys.is_finalizing():
+                    return b""
+                if chunk.get("type") == "audio" and chunk.get("data"):
+                    chunks.append(chunk["data"])
+            return b"".join(chunks)
+
+        mp3_bytes = asyncio.run(_fetch())
+        if mp3_bytes and not (_SHUTTING_DOWN.is_set() or sys.is_finalizing()):
+            decoded = miniaudio.decode(mp3_bytes, output_format=miniaudio.SampleFormat.SIGNED16,
+                                       nchannels=1, sample_rate=RATE)
+            return np.frombuffer(decoded.samples, dtype=np.int16).copy()
+        if _SHUTTING_DOWN.is_set() or sys.is_finalizing():
+            return None
+    except Exception as e:
+        if _SHUTTING_DOWN.is_set() or sys.is_finalizing() or "interpreter shutdown" in str(e):
+            return None
+        print(f"  ⚠️  edge-tts ล้มเหลว ({e}) → ลองใช้เสียงในเครื่องแทน")
+
+    if _SHUTTING_DOWN.is_set() or sys.is_finalizing():
+        return None
+    # สำรอง: ใช้ Windows System.Speech (SAPI) สังเคราะห์ลงไฟล์ WAV
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        escaped = text.replace("'", "''")
+        ps = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            "$v = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -like 'th*' } | Select-Object -First 1; "
+            "if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }; "
+            f"$s.SetOutputToWaveFile('{path}'); "
+            f"$s.Speak('{escaped}'); "
+            "$s.Dispose()"
+        )
+        ps_exe = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        r = subprocess.run([ps_exe, "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and Path(path).exists() and Path(path).stat().st_size > 44:
+            return load_wav(path)
+    except Exception as e:
+        if not (_SHUTTING_DOWN.is_set() or sys.is_finalizing()):
+            print(f"  ⚠️  สังเคราะห์เสียงสำรองไม่สำเร็จ: {e}")
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return None
+
+
 def synthesize(text: str) -> np.ndarray | None:
-    """ให้ say สังเคราะห์เป็นไฟล์ WAV 16 kHz แล้วอ่านกลับมาเป็น int16"""
+    """สังเคราะห์ข้อความเป็นเสียง int16 16 kHz mono"""
+    if IS_WIN:
+        return _win_synthesize(text)
     fd, path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     try:
@@ -1536,14 +2042,18 @@ def canned_texts() -> list[str]:
 
 def warm_tts() -> None:
     """สังเคราะห์ประโยคสำเร็จรูปเก็บไว้ล่วงหน้า (เบื้องหลัง ครั้งแรก ~2 นาที ครั้งต่อไปโหลดจากไฟล์ทันที)"""
+    import atexit
+    atexit.register(_SHUTTING_DOWN.set)
     todo = canned_texts()
     CANNED.update(todo)
     made = 0
     for text in todo:
+        if _SHUTTING_DOWN.is_set() or sys.is_finalizing():
+            return
         if not (TTS_CACHE_DIR / f"{_tts_key(text)}.npy").exists():
             made += 1
         speech_audio(text)
-    if made:
+    if made and not (_SHUTTING_DOWN.is_set() or sys.is_finalizing()):
         print(f"  🗣️  เตรียมเสียงประโยคสำเร็จรูปไว้แล้ว {made} ประโยค (ตอบได้ทันที ไม่ต้องรอสังเคราะห์)")
 
 
@@ -1564,6 +2074,7 @@ class SaySpeaker:
         self.enabled = enabled
         self.proc: subprocess.Popen | None = None
         self.recent: deque = deque(maxlen=5)
+        self._win_playing = False
 
     def say(self, text: str) -> None:
         if not text:
@@ -1573,22 +2084,52 @@ class SaySpeaker:
         if not self.enabled:
             return
         self.stop()
+        if IS_WIN:
+            def _play():
+                self._win_playing = True
+                try:
+                    audio = speech_audio(text)
+                    if audio is not None:
+                        import sounddevice as sd
+                        sd.play(audio, samplerate=RATE, blocking=True)
+                except Exception as e:
+                    print(f"  ⚠️  เล่นเสียงไม่สำเร็จ: {e}")
+                finally:
+                    self._win_playing = False
+            threading.Thread(target=_play, daemon=True).start()
+            return
         self.proc = subprocess.Popen(["say", "-v", TTS_VOICE, "-r", str(TTS_RATE), "-f", "-"],
                                      stdin=subprocess.PIPE, text=True)
         self.proc.stdin.write(say_text(text))
         self.proc.stdin.close()
 
     def stop(self) -> None:
+        if IS_WIN:
+            if self._win_playing:
+                try:
+                    import sounddevice as sd
+                    sd.stop()
+                except Exception:
+                    pass
+                self._win_playing = False
+            return
         if self.playing:
             self.proc.terminate()
 
     @property
     def playing(self) -> bool:
+        if IS_WIN:
+            return self._win_playing
         return self.proc is not None and self.proc.poll() is None
 
     busy = playing
 
     def wait(self, timeout: float = 60, settle: bool = False) -> None:
+        if IS_WIN:
+            end = time.monotonic() + timeout
+            while self._win_playing and time.monotonic() < end:
+                time.sleep(0.05)
+            return
         if self.proc is not None:
             try:
                 self.proc.wait(timeout)
@@ -1684,15 +2225,18 @@ class Speaker:
         self.stream.close()
 
     def _synth_loop(self) -> None:
-        while True:
+        while not (_SHUTTING_DOWN.is_set() or sys.is_finalizing()):
             gen, text = self._jobs.get()
+            if _SHUTTING_DOWN.is_set() or sys.is_finalizing():
+                break
             try:
                 audio = speech_audio(text) if gen == self._gen else None
                 with self._lock:
                     if audio is not None and gen == self._gen:
                         self._chunks.append(audio)
             except Exception as e:                       # ประโยคเดียวพังต้องไม่ทำให้พูดไม่ได้อีกเลย
-                print(f"  ⚠️  เตรียมเสียงไม่สำเร็จ: {e}")
+                if not (_SHUTTING_DOWN.is_set() or sys.is_finalizing()):
+                    print(f"  ⚠️  เตรียมเสียงไม่สำเร็จ: {e}")
             finally:
                 with self._lock:
                     self._pending -= 1
@@ -1737,12 +2281,12 @@ class Segmenter:
     def __init__(self):
         ms = self.CHUNK_MS
         self.start_chunks = 3                        # พูดต่อเนื่อง ~0.1 วิ = เริ่มประโยค
-        self.barge_chunks = 10                       # ตอนน้องจางพูดอยู่ ต้องพูดชัดๆ ~0.3 วิ ถึงนับว่าพูดแทรก
+        self.barge_chunks = 10                       # ตอนจางวิทพูดอยู่ ต้องพูดชัดๆ ~0.3 วิ ถึงนับว่าพูดแทรก
         self.barge_threshold = max(VAD_THRESHOLD, 0.6)
         self.end_chunks = max(1, int(SILENCE_MS / ms))
         self.max_chunks = int(15_000 / ms)           # ยาวสุด 15 วิ
         self.min_voiced = int(300 / ms)              # ต้องมีเสียงพูดรวม ≥ 0.3 วิ
-        # เก็บเสียงก่อนเริ่มพูด ~0.5 วิ บวกช่วงที่ใช้ตัดสินว่าพูดแทรก กันหัวคำ ("น้องจาง") หาย
+        # เก็บเสียงก่อนเริ่มพูด ~0.5 วิ บวกช่วงที่ใช้ตัดสินว่าพูดแทรก กันหัวคำ ("จางวิท") หาย
         # (เดิมเท่ากับ barge_chunks พอดี → ตอนพูดแทรกไม่เหลือเสียงก่อนหน้าเลย; แนวคิดจาก pipecat, BSD-2)
         self.preroll: deque = deque(maxlen=int(500 / ms) + self.barge_chunks)
         self.reset()
@@ -1752,10 +2296,10 @@ class Segmenter:
 
     def feed(self, chunk: np.ndarray, prob: float, playing: bool = False,
              allow_barge: bool = True) -> tuple[np.ndarray | None, bool]:
-        """คืน (เสียงของประโยคที่จบแล้ว หรือ None, เพิ่งเริ่มพูดแทรกตอนน้องจางพูดอยู่หรือไม่)"""
+        """คืน (เสียงของประโยคที่จบแล้ว หรือ None, เพิ่งเริ่มพูดแทรกตอนจางวิทพูดอยู่หรือไม่)"""
         self.preroll.append(chunk)
         if not self.active:
-            if playing and not allow_barge:          # ช่วงต้นประโยคของน้องจาง: ยังไม่รับการแทรก
+            if playing and not allow_barge:          # ช่วงต้นประโยคของจางวิท: ยังไม่รับการแทรก
                 self.run = 0
                 return None, False
             threshold = self.barge_threshold if playing else VAD_THRESHOLD
@@ -1795,7 +2339,7 @@ class Ears:
         self.speaker = speaker
         self.vad = SileroVoiceActivityDetector()
         self.seg = Segmenter()
-        # ประโยคที่พูดจบแล้ว: (เสียง float32, เริ่มตอนน้องจางพูดอยู่ไหม, ทำให้น้องจางหยุดชั่วคราวไหม)
+        # ประโยคที่พูดจบแล้ว: (เสียง float32, เริ่มตอนจางวิทพูดอยู่ไหม, ทำให้จางวิทหยุดชั่วคราวไหม)
         self.utterances: queue.Queue = queue.Queue()
         self._blocks: queue.Queue = queue.Queue()
         self.rtc, self.apm = make_echo_canceller() if isinstance(speaker, Speaker) else (None, None)
@@ -1848,7 +2392,7 @@ class Ears:
         """AEC พัง → ปิด AEC แล้วถอยไปแบบ half duplex (ไม่ให้ callback เสียงตายทั้งระบบ)"""
         self.apm = None
         self.barge_in = BARGE_IN == "on"
-        print(f"\n⚠️  ตัวตัดเสียงสะท้อนผิดพลาด ({e}) — ปิด AEC และไม่ฟังระหว่างน้องจางพูด")
+        print(f"\n⚠️  ตัวตัดเสียงสะท้อนผิดพลาด ({e}) — ปิด AEC และไม่ฟังระหว่างจางวิทพูด")
 
     def _reference(self, played: np.ndarray) -> None:
         """เสียงที่เพิ่งออกลำโพง → ป้อนให้ AEC รู้ว่าอะไรคือเสียงสะท้อน"""
@@ -1899,8 +2443,8 @@ class Ears:
             return
         self.level = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) / 32768   # ความดังไมค์ (HUD)
         prob = self.vad.process_chunk(chunk.tobytes())
-        # ผู้ใช้พูดค้างอยู่ตอนน้องจางเริ่มตอบ → พักไว้ก่อน (ต้องพูดต่อเนื่อง 4 ก้อน และพ้นช่วง warm-up
-        # ไม่งั้นเสียงสะท้อนช่วงต้นประโยคจะทำให้น้องจางหยุดตัวเอง)
+        # ผู้ใช้พูดค้างอยู่ตอนจางวิทเริ่มตอบ → พักไว้ก่อน (ต้องพูดต่อเนื่อง 4 ก้อน และพ้นช่วง warm-up
+        # ไม่งั้นเสียงสะท้อนช่วงต้นประโยคจะทำให้จางวิทหยุดตัวเอง)
         talking = playing and self.seg.active and not self.speaker.in_warmup and prob >= self.seg.barge_threshold
         self._talk = self._talk + 1 if talking else 0
         if self._talk >= 4:
@@ -1908,11 +2452,11 @@ class Ears:
             self._interrupted = True
         was_active = self.seg.active
         audio, barged = self.seg.feed(chunk, prob, playing, allow_barge=not self.speaker.in_warmup)
-        if self.seg.active and not was_active:       # เพิ่งเริ่มประโยค: จำว่าเริ่มตอนน้องจางพูดอยู่ไหม
+        if self.seg.active and not was_active:       # เพิ่งเริ่มประโยค: จำว่าเริ่มตอนจางวิทพูดอยู่ไหม
             self._overlap = playing                  # playing รวมช่วง TAIL หลังเสียงสุดท้ายแล้ว
             self._interrupted = False
         if barged:
-            # หยุดชั่วคราวก่อน ถ้าถอดความแล้วไม่ใช่ผู้ใช้เรียกน้องจางจริง จะพูดต่อจากเดิม
+            # หยุดชั่วคราวก่อน ถ้าถอดความแล้วไม่ใช่ผู้ใช้เรียกจางวิทจริง จะพูดต่อจากเดิม
             self.speaker.pause()
             self._interrupted = True
             print("\n✋ ได้ยินเสียงแทรก — หยุดฟังก่อน")
@@ -1967,7 +2511,7 @@ class AppleSTT:
     ส่ง: [ความยาว uint32][เสียง int16 16 kHz mono] → รับ: JSON หนึ่งบรรทัด {"text": ...}"""
     TIMEOUT = 15.0
 
-    def __init__(self, bias=("น้องจาง",)):
+    def __init__(self, bias=("จางวิท",)):
         import json
         import struct
         self.json, self.struct = json, struct
@@ -2047,9 +2591,16 @@ class STT:
             self._mlx = mlx_whisper
             self.whisper_name = f"mlx-whisper · {MLX_WHISPER_REPO}"
         else:
+            device, compute = "cpu", "int8"
+            try:
+                import ctranslate2
+                if ctranslate2.get_cuda_device_count() > 0:
+                    device, compute = "cuda", "float16"
+            except Exception:
+                pass
             from faster_whisper import WhisperModel
-            self._model = WhisperModel(FASTER_WHISPER_MODEL, device="cpu", compute_type="int8")
-            self.whisper_name = f"faster-whisper · {FASTER_WHISPER_MODEL} int8 CPU"
+            self._model = WhisperModel(FASTER_WHISPER_MODEL, device=device, compute_type=compute)
+            self.whisper_name = f"faster-whisper · {FASTER_WHISPER_MODEL} {compute} {device.upper()}"
         self._whisper_ready = True
 
     def close(self) -> None:
@@ -2139,6 +2690,8 @@ class STT:
 # ════════════════════════════════════════════════════════════════════════════
 
 def check_voice() -> None:
+    if IS_WIN:
+        return
     voices = read_cmd(["say", "-v", "?"])
     if not re.search(rf"^{re.escape(TTS_VOICE)}\s", voices, flags=re.M):
         print(f"⚠️  ไม่พบเสียง '{TTS_VOICE}' ในเครื่อง ติดตั้งได้ที่ System Settings › Accessibility › "
@@ -2193,29 +2746,29 @@ def run_wav(path: str, dry_run: bool) -> None:
 
 
 def private(text: str) -> str:
-    """ข้อความที่ไม่ได้พูดกับน้องจาง (เช่น คนในบ้านคุยกัน) ไม่ต้องเก็บเนื้อหา แค่บอกความยาว"""
+    """ข้อความที่ไม่ได้พูดกับจางวิท (เช่น คนในบ้านคุยกัน) ไม่ต้องเก็บเนื้อหา แค่บอกความยาว"""
     return text if LOG_HEARD == "all" else f"({len(text)} ตัวอักษร)"
 
 
 def should_handle(text: str, assistant: Assistant, recent=(), overlapped: bool = False) -> bool:
-    """กรองข้อความที่ได้จากเสียง: ขยะของ Whisper, เสียงน้องจางเองที่ย้อนเข้าไมค์, ไม่ได้เรียก "น้องจาง"
-    overlapped = ประโยคนี้เริ่มตอนน้องจางกำลังพูด (อาจเป็นเสียงสะท้อน) → ต้องเรียกชื่อเท่านั้น"""
+    """กรองข้อความที่ได้จากเสียง: ขยะของ Whisper, เสียงจางวิทเองที่ย้อนเข้าไมค์, ไม่ได้เรียก "จางวิท"
+    overlapped = ประโยคนี้เริ่มตอนจางวิทกำลังพูด (อาจเป็นเสียงสะท้อน) → ต้องเรียกชื่อเท่านั้น"""
     if not text or is_garbage(text):
         return False
     if overlapped and is_echo(text, recent):
-        print(f"  (ตัดทิ้ง: เสียงของน้องจางเองที่ย้อนเข้าไมค์) {text}")
+        print(f"  (ตัดทิ้ง: เสียงของจางวิทเองที่ย้อนเข้าไมค์) {text}")
         return False
     if has_wake(text):
         return True
     if overlapped:
-        print(f"  (ได้ยินระหว่างน้องจางพูด แต่ไม่ได้เรียกชื่อ — ข้าม) {private(text)}")
+        print(f"  (ได้ยินระหว่างจางวิทพูด แต่ไม่ได้เรียกชื่อ — ข้าม) {private(text)}")
         return False
-    # ช่วงคุยต่อโดยไม่ต้องเรียกชื่อ: เฉพาะหลังผู้ใช้คุยด้วยจริง นับจากตอนที่น้องจางพูดตอบจบ
+    # ช่วงคุยต่อโดยไม่ต้องเรียกชื่อ: เฉพาะหลังผู้ใช้คุยด้วยจริง นับจากตอนที่จางวิทพูดตอบจบ
     last = assistant.last_active
     if last and assistant.speaker._last_sound > last:
         last = assistant.speaker._last_sound
     if not last or time.monotonic() - last > FOLLOWUP_SEC:
-        print(f"  💤 ไม่ได้เรียกน้องจาง — ข้าม: {private(text)}")
+        print(f"  💤 ไม่ได้เรียกจางวิท — ข้าม: {private(text)}")
         return False
     return True
 
@@ -2223,8 +2776,10 @@ def should_handle(text: str, assistant: Assistant, recent=(), overlapped: bool =
 def run_mic(dry_run: bool) -> None:
     # ตัวเปิดแอป/run_app.sh ปิดด้วย SIGTERM → ให้เหมือน Ctrl+C (KeyboardInterrupt → finally: shutdown)
     # ไม่งั้นถ้าโดนปิดก่อนเมนูบาร์พร้อม หรือ MENUBAR=off เซิร์ฟเวอร์ LLM ในเครื่อง (~2.5 GB) จะค้าง
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, signal.default_int_handler)
+    for sig_name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            signal.signal(sig, signal.default_int_handler)
     watch_launcher()
     check_voice()
     Jev()                            # เช็คคีย์ก่อนโหลดโมเดลใหญ่ (ไม่มีคีย์จะหยุดตรงนี้)
@@ -2244,19 +2799,20 @@ def run_mic(dry_run: bool) -> None:
 
     duplex = ("full duplex + ตัดเสียงสะท้อน (AEC)" if ears.apm is not None and ears.barge_in else
               "full duplex ไม่มี AEC (ควรใส่หูฟัง)" if ears.barge_in else
-              "half duplex (ไม่ฟังระหว่างน้องจางพูด)")
+              "half duplex (ไม่ฟังระหว่างจางวิทพูด)")
     llm_label = (f"ในเครื่อง · {LOCAL_LLM_MODEL} (ตอบคำถาม + ท่องเว็บ)" if LLM_PROVIDER == "ในเครื่อง" else
                  f"{LLM_PROVIDER} {LLM_MODEL} · ท่องเว็บ {AGENT_MODEL}" if LLM_KEY else "ยังไม่ได้ตั้งค่า")
+    jev_label = JEV_MODEL if TYPESAFE_API_KEY else f"{LLM_PROVIDER} ({LLM_MODEL}) [แทน TypeSafe]"
     wake = f"{', '.join(WAKE_WORDS)} (คุยต่อได้ {FOLLOWUP_SEC:.0f} วิโดยไม่ต้องเรียกซ้ำ)" if WAKE_WORDS \
         else "ไม่ใช้ (ฟังทุกประโยค)"
     print(f"""
-╭─ Jarvis ไทย · น้องจาง ─────────────────────────────────
+╭─ Jarvis ไทย · จางวิท ─────────────────────────────────
 │ STT      : {stt.name}{f" · ความเห็นที่สอง {stt.second}" if stt.second else ""}
-│ Jev      : {JEV_MODEL} · CONF_MIN {CONF_MIN:.2f} (คำสั่งเสี่ยง {CONF_RISKY:.2f})
+│ Jev      : {jev_label} · CONF_MIN {CONF_MIN:.2f} (คำสั่งเสี่ยง {CONF_RISKY:.2f})
 │ LLM      : {llm_label}
 │ เสียง     : {TTS_VOICE} @ {TTS_RATE}{f" ทุ้ม {TTS_PITCH}" if TTS_PITCH else ""} · {duplex}
 │ คำปลุก    : {wake}{'  · DRY-RUN' if dry_run else ''}
-╰─ พูดได้เลย เช่น "น้องจาง เปิดสปอติฟาย" (Ctrl+C เพื่อออก)""")
+╰─ พูดได้เลย เช่น "จางวิท เปิดสปอติฟาย" (Ctrl+C เพื่อออก)""")
     speaker.say(pick("ready"))
     threading.Thread(target=warm_tts, daemon=True).start()   # เตรียมเสียงประโยคสำเร็จรูป (ตอบได้ทันที)
 
@@ -2274,7 +2830,7 @@ def run_mic(dry_run: bool) -> None:
                     if interrupted:                  # ไม่ใช่ผู้ใช้เรียกจริง → พูดต่อจากที่ค้างไว้
                         speaker.resume()
                     continue
-                if interrupted:                      # ผู้ใช้เรียกน้องจางจริง → ทิ้งประโยคที่พูดค้าง
+                if interrupted:                      # ผู้ใช้เรียกจางวิทจริง → ทิ้งประโยคที่พูดค้าง
                     speaker.stop()
                 print(f"\n🗣️  {text}  ·  STT {ms:.0f} ms ({len(audio) / RATE:.1f} วิ)")
                 assistant.handle(text, (lambda a=audio: stt.transcribe_second(a)) if stt.second else None)
@@ -2296,7 +2852,7 @@ def run_mic(dry_run: bool) -> None:
 
 def watch_launcher() -> None:
     """เปิดผ่าน Jarvis.app: ถ้าตัวเปิดแอปตาย (Force Quit/kill -9) ให้ปิดตาม ไม่งั้นไมค์ค้างเปิดและเปิดซ้ำได้สองตัว"""
-    if os.environ.get("JARVIS_APP") != "1":
+    if IS_WIN or os.environ.get("JARVIS_APP") != "1":
         return
     ppid = os.getppid()
     if ppid == 1:                                   # ตัวเปิดตายไปก่อนเราจะเริ่ม
@@ -2310,7 +2866,7 @@ def watch_launcher() -> None:
             kq.control(None, 1)                     # รอจนตัวเปิดแอปจบ
         except OSError:                             # ตัวเปิดหายไปแล้ว
             pass
-        print("⚠️  ตัวเปิดแอปหายไป → ปิดน้องจางตาม")
+        print("⚠️  ตัวเปิดแอปหายไป → ปิดจางวิทตาม")
         os.kill(os.getpid(), signal.SIGINT)         # ใช้ทางปิดปกติ (เก็บกวาดครบ)
         time.sleep(6)                               # เธรดหลักค้าง → ปิดแรงๆ
         LocalLLM.stop()
@@ -2320,6 +2876,7 @@ def watch_launcher() -> None:
 
 def shutdown(ears) -> None:
     """ปิดทุกอย่างให้เรียบร้อย (เรียกซ้ำได้): ไมค์ ลำโพง และเซิร์ฟเวอร์ LLM ในเครื่อง"""
+    _SHUTTING_DOWN.set()
     if getattr(shutdown, "done", False):
         return
     shutdown.done = True
@@ -2331,10 +2888,183 @@ def shutdown(ears) -> None:
             pass
 
 
+def _run_win_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
+    """ไอคอนบน System Tray (pystray) + หน้าจอ J.A.R.V.I.S ลอยบนจอ (pywebview / WebView2) สำหรับ Windows 11"""
+    import json
+    from PIL import Image, ImageDraw
+
+    labels = {"off": "ปิดการฟังอยู่", "web": "กำลังท่องเว็บ…", "control": "กำลังคุมเครื่อง…", "speak": "กำลังพูด…",
+              "think": "กำลังคิด…", "listen": "กำลังฟัง — เรียก \"จางวิท\" ได้เลย"}
+    colors = {"listen": "#36e3ff", "speak": "#8fc8ff", "think": "#ffb13b",
+              "web": "#4dffa6", "control": "#c77dff", "off": "#6f8190"}
+
+    def current_state() -> str:
+        job = assistant.job
+        return ("off" if not ears.listening else "web" if job == "web" else "control" if job else
+                "speak" if ears.speaker.playing else "think" if assistant.thinking else "listen")
+
+    def make_tray_icon(state: str):
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        col = colors.get(state, "#36e3ff")
+        d.ellipse((6, 6, 58, 58), outline=col, width=5)
+        d.ellipse((20, 20, 44, 44), fill=col)
+        return img
+
+    state_file = ROOT / ".hud.json"
+    try:
+        saved = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+
+    pinned = [saved.get("pinned", True)]
+    visible = [saved.get("visible", True)]
+    win_ref = [None]
+    tray_ref = [None]
+    stop_ev = threading.Event()
+
+    def save_hud():
+        w = win_ref[0]
+        if w is None:
+            return
+        try:
+            state_file.write_text(json.dumps({
+                "x": int(w.x), "y": int(w.y), "pinned": pinned[0], "visible": visible[0]
+            }), encoding="utf-8")
+        except Exception:
+            pass
+
+    def toggle_listen(*_):
+        ears.set_listening(not ears.listening)
+
+    def toggle_hud(*_):
+        visible[0] = not visible[0]
+        w = win_ref[0]
+        if w is not None:
+            try:
+                w.show() if visible[0] else w.hide()
+            except Exception:
+                pass
+
+    def toggle_pin(*_):
+        pinned[0] = not pinned[0]
+        w = win_ref[0]
+        if w is not None:
+            try:
+                w.on_top = pinned[0]
+            except Exception:
+                pass
+
+    def quit_app(*_):
+        stop_ev.set()
+        save_hud()
+        shutdown(ears)
+        if tray_ref[0] is not None:
+            try:
+                tray_ref[0].stop()
+            except Exception:
+                pass
+        if win_ref[0] is not None:
+            try:
+                win_ref[0].destroy()
+            except Exception:
+                pass
+        os._exit(0)
+
+    # 1) เริ่มไอคอนบน System Tray ในเธรดแยก
+    try:
+        import pystray
+        menu = pystray.Menu(
+            pystray.MenuItem(lambda _: labels[current_state()], None, enabled=False),
+            pystray.MenuItem(lambda _: f"ได้ยินล่าสุด: {(assistant.last_text[:40] or '-')}", None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(lambda _: "เริ่มฟัง" if not ears.listening else "หยุดฟัง", toggle_listen),
+            pystray.MenuItem(lambda _: "ซ่อน J.A.R.V.I.S" if visible[0] else "แสดง J.A.R.V.I.S", toggle_hud),
+            pystray.MenuItem("ปักหมุด J.A.R.V.I.S ไว้บนสุด", toggle_pin, checked=lambda _: pinned[0]),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("ออกจากจางวิท", quit_app),
+        )
+        tray = pystray.Icon("jarvis", make_tray_icon("listen"), "จางวิท (J.A.R.V.I.S)", menu)
+        tray_ref[0] = tray
+        threading.Thread(target=tray.run, daemon=True).start()
+    except Exception as e:
+        print(f"ℹ️  ไม่แสดงไอคอน System Tray ({e})")
+
+    # 2) เริ่มลูปฟังไมค์ในเธรดแยก
+    threading.Thread(target=listen_loop, daemon=True).start()
+
+    # 3) ถ้าเปิด HUD ให้รัน pywebview บนเธรดหลัก
+    if HUD:
+        try:
+            import webview
+            from computer_agent import screen_size
+            sw, sh = screen_size()
+            w, h = 380, 450
+            x = int(saved.get("x", sw - w - 30))
+            y = int(saved.get("y", sh - h - 70))
+
+            class HudApi:
+                def toggle_listen(self):
+                    toggle_listen()
+
+            win = webview.create_window(
+                "J.A.R.V.I.S",
+                url=str(ROOT / "hud.html"),
+                js_api=HudApi(),
+                width=w, height=h, x=x, y=y,
+                frameless=True, easy_drag=True,
+                transparent=True, on_top=pinned[0],
+                hidden=not visible[0],
+            )
+            win_ref[0] = win
+
+            def _updater():
+                last_state = ""
+                while not stop_ev.is_set():
+                    time.sleep(0.05)
+                    st = current_state()
+                    if st != last_state and tray_ref[0] is not None:
+                        last_state = st
+                        try:
+                            tray_ref[0].icon = make_tray_icon(st)
+                            tray_ref[0].title = f"จางวิท: {labels[st]}"
+                        except Exception:
+                            pass
+                    if visible[0] and win_ref[0] is not None:
+                        try:
+                            assistant.hud_rect = (win.x, win.y, win.width, win.height)
+                            speaker = ears.speaker
+                            level = getattr(speaker, "level", 0.0) if st == "speak" else ears.level
+                            recent = list(getattr(speaker, "recent", []))
+                            data = {"state": st, "level": round(level, 4), "pinned": pinned[0],
+                                    "heard": assistant.last_text[-80:], "reply": recent[-1][1][:90] if recent else ""}
+                            win.evaluate_js(f"window.hud && hud.update({json.dumps(data)})")
+                        except Exception:
+                            pass
+                    else:
+                        assistant.hud_rect = None
+
+            print("🎛  มีไอคอนไมค์ใน System Tray และหน้าจอ J.A.R.V.I.S บนจอ (ลากย้ายได้ · ดับเบิลคลิก = หยุด/เริ่มฟัง)")
+            for sig_name in ("SIGINT", "SIGTERM"):
+                sig = getattr(signal, sig_name, None)
+                if sig is not None:
+                    signal.signal(sig, lambda *_: quit_app())
+            webview.start(_updater)
+            _SHUTTING_DOWN.set()
+            stop_ev.set()
+            save_hud()
+            return True
+        except Exception as e:
+            print(f"⚠️  เปิดหน้าต่าง HUD ไม่ได้ ({e}) — ทำงานต่อในโหมดเทอร์มินัล")
+    return False
+
+
 def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
     """ไอคอนบนแถบเมนู + HUD แบบ J.A.R.V.I.S ลอยบนจอ
     ลูปฟังย้ายไปเธรดแยก ส่วนเธรดหลักรัน event loop ของ macOS (AppKit ต้องอยู่เธรดหลัก)
     คืน False ถ้าใช้ไม่ได้ (ไม่มี PyObjC) เพื่อให้ไปใช้โหมดเทอร์มินัลอย่างเดียว"""
+    if IS_WIN:
+        return _run_win_menubar(ears, assistant, listen_loop)
     try:
         import AppKit
         from Foundation import NSURL, NSObject, NSTimer
@@ -2346,7 +3076,7 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
     symbols = {"off": "mic.slash.fill", "web": "globe", "control": "cursorarrow.click.2", "speak": "waveform",
                "think": "ellipsis.circle", "listen": "mic.fill"}
     labels = {"off": "ปิดการฟังอยู่", "web": "กำลังท่องเว็บ…", "control": "กำลังคุมเครื่อง…", "speak": "กำลังพูด…",
-              "think": "กำลังคิด…", "listen": "กำลังฟัง — เรียก \"น้องจาง\" ได้เลย"}
+              "think": "กำลังคิด…", "listen": "กำลังฟัง — เรียก \"จางวิท\" ได้เลย"}
 
     def current_state() -> str:
         job = assistant.job
@@ -2387,7 +3117,7 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
                 image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbols[state], labels[state])
                 image.setTemplate_(True)                 # สีตามธีมของแถบเมนูอัตโนมัติ
                 self.item.button().setImage_(image)
-                self.item.button().setToolTip_(f"น้องจาง: {labels[state]}")
+                self.item.button().setToolTip_(f"จางวิท: {labels[state]}")
                 self.status.setTitle_(labels[state])
             self.toggle.setTitle_("เริ่มฟัง" if state == "off" else "หยุดฟัง")
             if self.hud is not None:
@@ -2414,7 +3144,7 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
     ctl.hud_toggle = add("ซ่อน J.A.R.V.I.S", "toggleHud:")
     ctl.pin = add("ปักหมุด J.A.R.V.I.S ไว้บนสุด", "togglePin:")
     menu.addItem_(AppKit.NSMenuItem.separatorItem())
-    add("ออกจากน้องจาง", "quit:", "q")
+    add("ออกจากจางวิท", "quit:", "q")
     ctl.item.setMenu_(menu)
 
     ctl.hud = None
@@ -2547,8 +3277,8 @@ class JarvisHUD:
 
 # ── ชุดทดสอบ --eval: (กลุ่ม, ประโยค, ประเภทที่ถูก, ขั้นตอนที่ถูก [(action, app, volume)]) ──
 EVAL_CASES = [
-    ("คำสั่งเดี่ยว", "น้องจาง เปิดสปอติฟายให้หน่อย", "command", [("open_app", "Spotify")]),
-    ("คำสั่งเดี่ยว", "น้องจ้าง ปิดไลน์ที", "command", [("quit_app", "LINE")]),
+    ("คำสั่งเดี่ยว", "จางวิท เปิดสปอติฟายให้หน่อย", "command", [("open_app", "Spotify")]),
+    ("คำสั่งเดี่ยว", "จางวิทย์ ปิดไลน์ที", "command", [("quit_app", "LINE")]),
     ("คำสั่งเดี่ยว", "เพิ่มเสียงหน่อย", "command", [("volume_up",)]),
     ("คำสั่งเดี่ยว", "เบาเสียงลงหน่อยครับ", "command", [("volume_down",)]),
     ("คำสั่งเดี่ยว", "ตั้งเสียงไว้ที่ห้าสิบเปอร์เซ็นต์", "command", [("volume_set", None, 50)]),
@@ -2559,24 +3289,24 @@ EVAL_CASES = [
     ("คำสั่งเดี่ยว", "ตอนนี้กี่โมงแล้ว", "command", [("tell_time",)]),
     ("คำสั่งเดี่ยว", "เปิดวีเอสโค้ดหน่อย", "command", [("open_app", "Visual Studio Code")]),
     ("คำสั่งเดี่ยว", "ขอ Google Chrome หน่อย", "command", [("open_app", "Google Chrome")]),
-    ("คำสั่งเดี่ยว", "น้องจาง เปิดยูทูบให้หน่อย", "command", [("open_app", "YouTube")]),
+    ("คำสั่งเดี่ยว", "จางวิท เปิดยูทูบให้หน่อย", "command", [("open_app", "YouTube")]),
     ("คำสั่งเดี่ยว", "ตั้งเสียงสามสิบห้า", "command", [("volume_set", None, 35)]),
     ("คำสั่งซ้อน", "หยุดเพลงแล้วเปิดสแล็ก", "command", [("music_pause",), ("open_app", "Slack")]),
     ("คำสั่งซ้อน", "ปิดซาฟารีแล้วเปิดโน้ต", "command", [("quit_app", "Safari"), ("open_app", "Notes")]),
     ("คำสั่งซ้อน", "เพิ่มเสียงแล้วก็เปลี่ยนเพลงถัดไป", "command", [("volume_up",), ("music_next",)]),
     ("คำสั่งซ้อน", "ปิด Slack แล้วตั้งเสียง 30", "command", [("quit_app", "Slack"), ("volume_set", None, 30)]),
-    ("งานบนเว็บ", "น้องจาง หาห้องพักแถวเมืองทองธานีให้หน่อย", "command", [("web_task",)]),
+    ("งานบนเว็บ", "จางวิท หาห้องพักแถวเมืองทองธานีให้หน่อย", "command", [("web_task",)]),
     ("งานบนเว็บ", "ช่วยเช็คราคาไอโฟนรุ่นล่าสุดให้หน่อย", "command", [("web_task",)]),
     ("งานบนเว็บ", "พรุ่งนี้กรุงเทพฝนจะตกไหม", "command", [("web_task",)]),
-    ("คุมคอม", "น้องจาง อ่านจอให้ฟังหน่อย", "command", [("read_screen",)]),
-    ("คุมคอม", "น้องจาง อ่านจอได้รึเปล่า", "command", [("read_screen",)]),
+    ("คุมคอม", "จางวิท อ่านจอให้ฟังหน่อย", "command", [("read_screen",)]),
+    ("คุมคอม", "จางวิท อ่านจอได้รึเปล่า", "command", [("read_screen",)]),
     ("คุมคอม", "คลิกปุ่มบันทึกให้หน่อย", "command", [("computer_task",)]),
     ("คุมคอม", "เลื่อนลงอีกหน่อย", "command", [("computer_task",)]),
     ("คุมคอม", "พิมพ์คำว่าสวัสดีลงไปในช่องนี้ที", "command", [("computer_task",)]),
     ("คำถามทั่วไป", "เมืองหลวงของญี่ปุ่นคือที่ไหน", "question", []),
     ("คำถามทั่วไป", "ทำไมท้องฟ้าถึงเป็นสีฟ้า", "question", []),
     ("คำถามทั่วไป", "แนะนำวิธีนอนให้หลับง่ายหน่อย", "question", []),
-    ("คำถามทั่วไป", "น้องจาง สวัสดี วันนี้เป็นยังไงบ้าง", "question", []),
+    ("คำถามทั่วไป", "จางวิท สวัสดี วันนี้เป็นยังไงบ้าง", "question", []),
     ("เสียงรบกวน", "เออ แม่ วันนี้กินข้าวที่ไหนดี", "noise", []),
     ("เสียงรบกวน", "อืม เอ่อ", "noise", []),
     ("เสียงรบกวน", "ขอบคุณที่รับชมค่ะ", "noise", []),
@@ -2639,7 +3369,7 @@ def run_eval() -> float:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Jarvis ไทย (น้องจาง) — ผู้ช่วยสั่งงาน macOS ด้วยเสียงภาษาไทย แบบ full duplex")
+    parser = argparse.ArgumentParser(description="Jarvis ไทย (จางวิท) — ผู้ช่วยสั่งงานด้วยเสียงภาษาไทย แบบ full duplex")
     parser.add_argument("--text", help="สั่งด้วยข้อความแทนเสียง")
     parser.add_argument("--dry-run", action="store_true", help="ไม่สั่งเครื่องจริง แค่ print ว่าจะทำอะไร")
     parser.add_argument("--eval", action="store_true", help="วัดความแม่นกับชุดประโยคทดสอบภาษาไทย")

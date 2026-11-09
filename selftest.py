@@ -1,4 +1,4 @@
-"""ทดสอบว่าน้องจางอ่านจอ คุมเมาส์ และคีย์บอร์ดได้จริงไหม — โดยไม่แตะงานของผู้ใช้เลย
+"""ทดสอบว่าจางวิทอ่านจอ คุมเมาส์ และคีย์บอร์ดได้จริงไหม — โดยไม่แตะงานของผู้ใช้เลย
 
 เปิดหน้าต่างทดสอบของตัวเองกลางจอ (ป้าย + ช่องพิมพ์ + ปุ่ม) แล้วทดสอบกับหน้าต่างนี้เท่านั้น:
   1) สิทธิ์ที่ macOS ให้แอปที่รับผิดชอบ (ควรเป็น "Jarvis" เมื่อเปิดผ่าน ./run_app.sh --selftest)
@@ -10,7 +10,9 @@
 """
 from __future__ import annotations
 
+import ctypes
 import os
+import platform
 import threading
 import time
 from pathlib import Path
@@ -22,7 +24,130 @@ BUTTON = "กดทดสอบ"
 LOG = Path(__file__).resolve().parent / "logs" / "selftest.log"
 
 
+def _run_win_selftest() -> bool:
+    import tkinter as tk
+    lines: list[str] = []
+    results: list[bool | None] = []
+
+    def report(name: str, ok: bool | None, detail: str = "") -> None:
+        results.append(ok)
+        mark = "✅" if ok else "⏭ " if ok is None else "❌"
+        lines.append(f"{mark} {name}{' — ' + detail if detail else ''}")
+        print(lines[-1], flush=True)
+
+    lines.append(f"🧪 ทดสอบการคุมเครื่อง (Windows 11) {time.strftime('%Y-%m-%d %H:%M:%S')} · แอปที่ถือสิทธิ์: {ca.responsible_app()}")
+    print(lines[-1], flush=True)
+    ax_ok, screen_ok, post_ok = ca.accessibility_ok(), ca.screen_permission_ok(), True
+    report("สิทธิ์ UIAutomation (อ่านปุ่ม/คุมเครื่อง)", ax_ok)
+    report("สิทธิ์บันทึกหน้าจอ (อ่านจอ OCR)", screen_ok)
+    report("สิทธิ์ส่งเหตุการณ์เมาส์/คีย์บอร์ด (Win32 SendInput)", post_ok)
+
+    clicks = [0]
+    root = tk.Tk()
+    root.title("จางวิท · ทดสอบคุมเครื่อง")
+    w, h = 460, 230
+    sw, sh = ca.screen_size()
+    wx, wy = int((sw - w) // 2), int((sh - h) // 2)
+    root.geometry(f"{w}x{h}+{wx}+{wy}")
+    root.attributes("-topmost", True)
+
+    lbl = tk.Label(root, text=LABEL, font=("Segoe UI", 20, "bold"))
+    lbl.place(x=20, y=20, width=420, height=40)
+
+    entry = tk.Entry(root, font=("Segoe UI", 14))
+    entry.place(x=20, y=80, width=420, height=34)
+
+    def on_click():
+        clicks[0] += 1
+
+    btn = tk.Button(root, text=BUTTON, font=("Segoe UI", 12), command=on_click)
+    btn.place(x=20, y=140, width=200, height=42)
+
+    def pump(seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            root.update()
+            time.sleep(0.02)
+
+    pump(0.6)
+    root.lift()
+    root.focus_force()
+    # ตั้งชื่อ Win32 HWND ให้ป้ายและปุ่มของ Tkinter เพื่อให้ทั้ง OCR และ UIAutomation มองเห็นตรงกัน
+    ctypes.windll.user32.SetWindowTextW(lbl.winfo_id(), LABEL)
+    ctypes.windll.user32.SetWindowTextW(btn.winfo_id(), BUTTON)
+    pump(0.4)
+
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    def cursor_pos() -> tuple[int, int]:
+        pt = _POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
+
+    orig_x, orig_y = cursor_pos()
+    try:
+        # ── 2) อ่านจอ ──
+        texts = ca.ocr_screen(max_items=600)
+        found = any("4821" in t["text"] or "SELFTEST" in t["text"].upper() for t in texts)
+        report("อ่านจอด้วย OCR (เจอป้ายของหน้าต่างทดสอบ)", found, f"อ่านได้ {len(texts)} ข้อความบนจอ (ไม่บันทึกเนื้อหา)")
+
+        # ── 3) เมาส์ + 4) คีย์บอร์ด ──
+        fx = entry.winfo_rootx() + entry.winfo_width() / 2
+        fy = entry.winfo_rooty() + entry.winfo_height() / 2
+        bx = btn.winfo_rootx() + btn.winfo_width() / 2
+        by = btn.winfo_rooty() + btn.winfo_height() / 2
+
+        ca.mouse_move(fx, fy)
+        pump(0.25)
+        cx, cy = cursor_pos()
+        report("ขยับเมาส์", abs(cx - fx) < 5 and abs(cy - fy) < 5, f"ไปที่ ({fx:.0f}, {fy:.0f})")
+
+        ca.mouse_click(fx, fy)
+        pump(0.3)
+        typed = "สวัสดีจางวิท Jarvis 123"
+        ca.type_unicode(typed)
+        pump(0.5)
+        got = entry.get()
+        report("พิมพ์ข้อความไทย+อังกฤษ", got == typed, f"ได้ «{got}»")
+
+        if got == typed:
+            ca.press_keys("cmd+a")
+            pump(0.25)
+            ca.type_unicode("OK")
+            pump(0.4)
+        got2 = entry.get()
+        report("ปุ่มลัด cmd+a (Ctrl+A) แล้วพิมพ์ทับ", got2 == "OK", f"ได้ «{got2}»")
+
+        ca.mouse_click(bx, by)
+        pump(0.4)
+        report("คลิกเมาส์ (กดปุ่มในหน้าต่างทดสอบ)", clicks[0] > 0, f"ปุ่มถูกกด {clicks[0]} ครั้ง")
+
+        # ── 5) UIAutomation ──
+        title, elements = ca.ax_elements(os.getpid())
+        ax_btn = next((e for e in elements if BUTTON in e.get("name", "")), None)
+        report("อ่านปุ่ม/ช่องผ่าน UIAutomation", len(elements) > 0, f"เจอ {len(elements)} ชิ้นในหน้าต่าง «{title}»")
+        if ax_btn is not None and "el" in ax_btn:
+            before = clicks[0]
+            ca._win_invoke_element(ax_btn["el"])
+            pump(0.3)
+            report("กดปุ่มผ่าน UIAutomation (ไม่ขยับเมาส์)", clicks[0] > before)
+    finally:
+        ca.mouse_move(orig_x, orig_y)
+        root.destroy()
+
+    passed, failed = results.count(True), results.count(False)
+    skipped = results.count(None)
+    lines.append(f"สรุป: ผ่าน {passed} · ไม่ผ่าน {failed} · ข้าม {skipped}")
+    print(lines[-1], flush=True)
+    LOG.parent.mkdir(exist_ok=True)
+    LOG.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return failed == 0 and skipped == 0
+
+
 def run_selftest() -> bool:
+    if platform.system() == "Windows":
+        return _run_win_selftest()
     import AppKit
     import ApplicationServices as AS
     import Quartz
@@ -114,7 +239,7 @@ def run_selftest() -> bool:
         AppKit.NSBackingStoreBuffered, False)
     win.setFloatingPanel_(True)
     win.setBecomesKeyOnlyIfNeeded_(False)
-    win.setTitle_("น้องจาง · ทดสอบคุมเครื่อง")
+    win.setTitle_("จางวิท · ทดสอบคุมเครื่อง")
     win.setLevel_(AppKit.NSStatusWindowLevel + 1)
     win.setReleasedWhenClosed_(False)
     label = AppKit.NSTextField.labelWithString_(LABEL)
@@ -211,7 +336,7 @@ def run_selftest() -> bool:
             if not kb:
                 report("พิมพ์ด้วยคีย์บอร์ด", None, "ข้าม — ปุ่มทดสอบ (Shift) ไปไม่ถึงหน้าต่างทดสอบ จึงไม่พิมพ์ (กันพิมพ์ใส่แอปอื่น)")
             else:
-                typed = "สวัสดีน้องจาง Jarvis 123"
+                typed = "สวัสดีจางวิท Jarvis 123"
                 ca.type_unicode(typed)
                 pump(0.6)
                 report("พิมพ์ข้อความไทย+อังกฤษ", text_now() == typed, f"ได้ «{text_now()}»")

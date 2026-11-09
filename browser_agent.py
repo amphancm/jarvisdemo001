@@ -1,7 +1,7 @@
 """
-น้องจางท่องเว็บ — เอเจนต์เล็กๆ ที่ให้ LLM (tool calling แบบ OpenAI) ขับเบราว์เซอร์จริงด้วย Playwright
+จางวิทท่องเว็บ — เอเจนต์เล็กๆ ที่ให้ LLM (tool calling แบบ OpenAI) ขับเบราว์เซอร์จริงด้วย Playwright
 
-- เปิด Google Chrome หน้าต่างจริงให้ผู้ใช้เห็น ใช้โปรไฟล์แยกของน้องจางเอง (.browser-profile)
+- เปิด Google Chrome หน้าต่างจริงให้ผู้ใช้เห็น ใช้โปรไฟล์แยกของจางวิทเอง (.browser-profile)
   แล้วเชื่อมต่อผ่าน CDP → ปิดโปรแกรมแล้วหน้าเว็บยังเปิดค้างไว้ให้ดูต่อ
 - LLM เห็นหน้าเว็บเป็น "รายการปุ่ม/ลิงก์ที่มีเลขกำกับ + ข้อความในหน้า" แล้วเรียกเครื่องมือ
   open_url / search / click / type_text / scroll / back / finish
@@ -15,8 +15,11 @@ jarvis.py เรียกใช้ผ่าน BrowserAgent.run() (บล็อ�
 from __future__ import annotations
 
 import json
+import os
+import platform
 import queue
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -25,13 +28,33 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote_plus, unquote
 
-CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+IS_WIN = platform.system() == "Windows"
+
+
+def _find_chrome() -> Path:
+    if IS_WIN:
+        candidates = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "Google/Chrome/Application/chrome.exe",
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        found = shutil.which("chrome") or shutil.which("chrome.exe")
+        if found:
+            return Path(found)
+        return candidates[0]
+    return Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+
+
+CHROME = _find_chrome()
 CDP_PORT = 9223
 MAX_STEPS = 15
 TASK_TIMEOUT = 180          # วินาที
 SNAPSHOT_CHARS = 4000       # งบตัวอักษรของหน้าเว็บต่อหนึ่งขั้น (หลังตัดขยะแล้ว 4000 ครอบคลุมเท่า 6000 เดิม)
 
-SYSTEM_PROMPT = """You are the web agent of น้องจาง, a Thai voice assistant on the user's Mac.
+SYSTEM_PROMPT = """You are the web agent of จางวิท, a Thai voice assistant on the user's computer.
 You control a real Google Chrome window with the tools to complete the user's Thai request.
 
 How to work:
@@ -435,9 +458,17 @@ def _ensure_window(port: int) -> None:
 
 def _kill_our_chrome(profile_dir: Path) -> None:
     """ปิด Chrome ที่เปิดด้วยโปรไฟล์ของน้องจางเท่านั้น (ไม่แตะ Chrome ส่วนตัวของผู้ใช้)"""
-    out = subprocess.run(["pgrep", "-f", f"--user-data-dir={profile_dir}"], capture_output=True, text=True).stdout
-    for pid in out.split():
-        subprocess.run(["kill", pid], capture_output=True)
+    if IS_WIN:
+        ps = (
+            "Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -like '*{profile_dir.name}*' }} | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True)
+    else:
+        out = subprocess.run(["pgrep", "-f", f"--user-data-dir={profile_dir}"], capture_output=True, text=True).stdout
+        for pid in out.split():
+            subprocess.run(["kill", pid], capture_output=True)
     for _ in range(50):
         if not _port_open(CDP_PORT):
             return

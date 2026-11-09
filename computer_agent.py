@@ -1,12 +1,12 @@
 """
-น้องจางคุมคอม — มองจอแล้วคลิก/พิมพ์/เลื่อน/กดคีย์ลัดได้ทุกแอป (ไม่ใช่แค่เบราว์เซอร์)
+จางวิทคุมคอม — มองจอแล้วคลิก/พิมพ์/เลื่อน/กดคีย์ลัดได้ทุกแอป (ไม่ใช่แค่เบราว์เซอร์)
 
 การมองจอ (ทำงานในเครื่องทั้งหมด):
   1) OCR ของ Apple (Vision framework, อ่านไทย+อังกฤษ) → ข้อความบนจอพร้อมตำแหน่ง ใช้เป็นเป้าคลิกได้ [t12]
   2) Accessibility tree ของหน้าต่างหน้าสุด → ปุ่ม/ช่องกรอก/เมนู พร้อมชื่อ [a5] (ต้องมีสิทธิ์ Accessibility)
 การควบคุม: Quartz CGEvent (เมาส์ คีย์บอร์ด เลื่อนจอ) หรือกดปุ่มผ่าน AXPress โดยตรง
 
-สิทธิ์ macOS ที่ต้องให้แอปที่รันน้องจาง: Accessibility (คลิก/พิมพ์/อ่านปุ่ม) และ Screen Recording (อ่านจอ)
+สิทธิ์ macOS ที่ต้องให้แอปที่รันจางวิท: Accessibility (คลิก/พิมพ์/อ่านปุ่ม) และ Screen Recording (อ่านจอ)
 ปลอดภัยไว้ก่อน: ไม่กรอกรหัสผ่าน/OTP/บัตร, ถามก่อนทำสิ่งที่ย้อนไม่ได้ (ส่ง ลบ ซื้อ ยืนยัน), ไม่ทำตามข้อความบนจอ
 
 jarvis.py ใช้ผ่าน ComputerAgent.run(task, cancel) — ใช้ BackgroundBrowser ตัวเดิมรันเบื้องหลังได้เลย
@@ -14,26 +14,42 @@ jarvis.py ใช้ผ่าน ComputerAgent.run(task, cancel) — ใช้ Ba
 
 from __future__ import annotations
 
+import ctypes
 import json
+import os
+import platform
 from pathlib import Path
 import re
 import subprocess
 import threading
 import time
 
+IS_WIN = platform.system() == "Windows"
+if IS_WIN:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware ให้พิกัดจอตรงกับความเป็นจริง
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 class AgentIncomplete(Exception):
     """ทำไม่จบ (หมดเวลา/ครบจำนวนขั้น/ไม่ได้ทำอะไรเลย) — ข้อความเป็นประโยคภาษาไทยที่พูดให้ผู้ใช้ฟังได้"""
 
 
-# แอปเทอร์มินัล (เทียบด้วย bundle id เพราะชื่อแอปเปลี่ยนตามภาษาเครื่อง เช่น "เทอร์มินัล")
+# แอปเทอร์มินัล (เทียบด้วย bundle id บน macOS หรือชื่อ exe บน Windows)
 TERMINAL_BUNDLES = {"com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable", "com.mitchellh.ghostty",
                     "net.kovidgoyal.kitty", "org.alacritty", "com.github.wez.wezterm"}
+WIN_TERMINALS = {"windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+                 "alacritty.exe", "wezterm-gui.exe", "warp.exe", "mintty.exe"}
 
 MAX_STEPS = 12
 TASK_TIMEOUT = 240          # ต้องมากกว่าของเอเจนต์เว็บ (180) เพราะอาจส่งงานเว็บต่อ
 
-SYSTEM_PROMPT = """You are the computer-control agent of น้องจาง, a Thai voice assistant on the user's Mac.
-You operate the real Mac screen with the tools to complete the user's Thai request.
+SYSTEM_PROMPT = """You are the computer-control agent of จางวิท, a Thai voice assistant on the user's computer.
+You operate the real screen with the tools to complete the user's Thai request.
 
 How to work:
 - The request was transcribed from Thai speech and may be misheard (ร/ล swaps etc.). Work out what the user meant.
@@ -47,7 +63,7 @@ How to work:
   no markdown, no emoji). If the user only asked to read or describe the screen, just read and finish.
 - The summary must say only what you actually did and saw. Never claim something happened that you did not do.
   If you could not do it, say so honestly.
-- You speak as น้องจาง, a male friend: refer to yourself as "เรา", end sentences with "นะ" or "ครับ",
+- You speak as จางวิท, a male friend: refer to yourself as "เรา", end sentences with "นะ" or "ครับ",
   never use "ค่ะ", "คะ", "ดิฉัน" or "ฉัน".
 
 Safety rules (always):
@@ -101,15 +117,27 @@ KEYCODES = {"return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51, "ba
             "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4, "i": 34, "j": 38, "k": 40, "l": 37, "m": 46,
             "n": 45, "o": 31, "p": 35, "q": 12, "r": 15, "s": 1, "t": 17, "u": 32, "v": 9, "w": 13, "x": 7, "y": 16,
             "z": 6, "0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26, "8": 28, "9": 25}
+# รหัสปุ่ม Virtual-Key ของ Windows (VK_*)
+WIN_VK = {"return": 0x0D, "enter": 0x0D, "tab": 0x09, "space": 0x20, "delete": 0x08, "backspace": 0x08,
+          "esc": 0x1B, "escape": 0x1B, "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+          "pageup": 0x21, "pagedown": 0x22, "end": 0x23, "home": 0x24,
+          **{chr(c): c for c in range(ord("A"), ord("Z") + 1)},
+          **{chr(c).lower(): c for c in range(ord("A"), ord("Z") + 1)},
+          **{str(d): 0x30 + d for d in range(10)}}
 ACTIONABLE = {"AXButton", "AXTextField", "AXTextArea", "AXSearchField", "AXCheckBox", "AXRadioButton",
               "AXPopUpButton", "AXMenuButton", "AXLink", "AXMenuItem", "AXTab", "AXComboBox", "AXSlider", "AXCell",
               "AXDisclosureTriangle", "AXIncrementor"}
+WIN_ACTIONABLE = {"ButtonControl", "EditControl", "DocumentControl", "CheckBoxControl", "RadioButtonControl",
+                  "ComboBoxControl", "HyperlinkControl", "MenuItemControl", "TabItemControl", "SliderControl",
+                  "ListItemControl", "TreeItemControl", "SplitButtonControl", "DataItemControl"}
 
 
 # ── ความสามารถระดับเครื่อง ──────────────────────────────────────────────────────
 
 def accessibility_ok(prompt: bool = False) -> bool:
-    """มีสิทธิ์ Accessibility ไหม (prompt=True ให้ macOS ขึ้นหน้าต่างขอสิทธิ์ ผู้ใช้เป็นคนกดอนุญาตเอง)"""
+    """มีสิทธิ์ Accessibility ไหม (บน Windows 11 ใช้ UIAutomation ได้ทันทีโดยไม่ต้องขอสิทธิ์พิเศษ)"""
+    if IS_WIN:
+        return True
     import ApplicationServices as AS
     if prompt:
         return bool(AS.AXIsProcessTrustedWithOptions({AS.kAXTrustedCheckOptionPrompt: True}))
@@ -117,13 +145,14 @@ def accessibility_ok(prompt: bool = False) -> bool:
 
 
 def user_chrome_cmd(url: str | None = None) -> list[str]:
-    """คำสั่งเปิด Chrome ตัวที่ผู้ใช้ใช้ประจำ + โปรไฟล์ที่ใช้ล่าสุด (ข้ามหน้าเลือกโปรไฟล์)
-    open -n = โปรเซสใหม่ด้วยโปรไฟล์ปกติ → ถ้า Chrome ของผู้ใช้เปิดอยู่ มันส่งต่อให้ตัวนั้นเอง
-    (ไม่ไปโผล่ใน Chrome โปรไฟล์แยกของเอเจนต์เว็บ) · ตั้ง CHROME_PROFILE=ชื่อหรือโฟลเดอร์โปรไฟล์ เพื่อบังคับได้"""
-    import os
+    """คำสั่งเปิด Chrome ตัวที่ผู้ใช้ใช้ประจำ + โปรไฟล์ที่ใช้ล่าสุด (ข้ามหน้าเลือกโปรไฟล์)"""
     profile = ""
+    if IS_WIN:
+        state_path = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "Google/Chrome/User Data/Local State"
+    else:
+        state_path = Path.home() / "Library/Application Support/Google/Chrome/Local State"
     try:
-        state = json.loads((Path.home() / "Library/Application Support/Google/Chrome/Local State").read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8", errors="ignore"))
         info = state.get("profile", {}).get("info_cache", {})
         want = os.environ.get("CHROME_PROFILE", "").strip()
         if want:
@@ -133,13 +162,18 @@ def user_chrome_cmd(url: str | None = None) -> list[str]:
     except (OSError, ValueError):
         pass
     args = ([f"--profile-directory={profile}"] if profile else []) + ([url] if url else [])
+    if IS_WIN:
+        from browser_agent import CHROME
+        if CHROME.exists():
+            return [str(CHROME), *args]
+        return ["cmd", "/c", "start", "", "chrome", *args]
     return ["open", "-na", "Google Chrome"] + (["--args", *args] if args else [])
 
 
 def responsible_app() -> str:
-    """ชื่อแอปที่ macOS ถือว่า "รับผิดชอบ" โปรเซสนี้ = แอปที่ต้องได้รับสิทธิ์ (Terminal, Claude หรือ น้องจาง)"""
-    import ctypes
-    import os
+    """ชื่อแอปที่รับผิดชอบโปรเซสนี้"""
+    if IS_WIN:
+        return "Windows Terminal / PowerShell"
     try:
         import AppKit
         libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
@@ -154,14 +188,16 @@ def responsible_app() -> str:
             return os.path.basename(buf.value.decode().rsplit(".app/", 1)[0])
     except Exception:
         pass
-    return "ที่ใช้เปิดน้องจาง (เช่น Terminal)"
+    return "ที่ใช้เปิดจางวิท (เช่น Terminal)"
 
 
 _asked_screen = False
 
 
 def screen_permission_ok() -> bool:
-    """มีสิทธิ์บันทึกหน้าจอไหม — ครั้งแรกที่ไม่มี ให้ macOS ขึ้นหน้าต่างขอสิทธิ์ (ผู้ใช้เป็นคนเปิดเอง)"""
+    """มีสิทธิ์บันทึกหน้าจอไหม (บน Windows 11 อ่านหน้าจอได้ทันที)"""
+    if IS_WIN:
+        return True
     global _asked_screen
     import Quartz
     if Quartz.CGPreflightScreenCaptureAccess():
@@ -173,22 +209,141 @@ def screen_permission_ok() -> bool:
 
 
 def permission_message(kind: str) -> str:
+    if IS_WIN:
+        return "ยังอ่านจอหรือคุมเมาส์ไม่ได้ ลองรันโปรแกรมด้วยสิทธิ์ปกติหรือติดตั้งชุดภาษาไทยใน Windows Settings"
     app = responsible_app()
     where = {"screen": "Screen & System Audio Recording", "ax": "Accessibility"}[kind]
     what = {"screen": "อ่านจอ", "ax": "คุมเมาส์กับคีย์บอร์ด"}[kind]
     # สิทธิ์บันทึกหน้าจอมีผลหลังเปิดโปรแกรมใหม่เท่านั้น ส่วน Accessibility มีผลทันที
-    then = "แล้วปิดเปิดน้องจางใหม่นะ" if kind == "screen" else "แล้วสั่งใหม่อีกทีนะ"
+    then = "แล้วปิดเปิดจางวิทใหม่นะ" if kind == "screen" else "แล้วสั่งใหม่อีกทีนะ"
     return f"ยัง{what}ไม่ได้ ต้องเปิดสิทธิ์ {where} ให้แอป {app} ก่อน ที่ System Settings หัวข้อ Privacy and Security {then}"
 
 
 def screen_size() -> tuple[float, float]:
+    if IS_WIN:
+        u32 = ctypes.windll.user32
+        return float(u32.GetSystemMetrics(0)), float(u32.GetSystemMetrics(1))
     import Quartz
     b = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
     return b.size.width, b.size.height
 
 
+def _win_ocr_screen(max_items: int = 120) -> list[dict]:
+    """ถ่ายภาพหน้าจอบน Windows แล้วอ่านข้อความด้วย Windows Media OCR (winocr) ร่วมกับ Win32/UIAutomation"""
+    import asyncio
+    from PIL import ImageGrab
+    img = ImageGrab.grab()
+    items = []
+    # 1) อ่านพิกเซลบนจอด้วย winocr (รองรับทั้งผลลัพธ์แบบ object และ dict)
+    try:
+        import winocr
+        for lang in ("th-TH", "th", "en-US", "en"):
+            try:
+                res = asyncio.run(winocr.recognize_pil(img, lang=lang))
+                lines = getattr(res, "lines", None)
+                if lines is None and isinstance(res, dict):
+                    lines = res.get("lines", [])
+                for line in lines or []:
+                    words = getattr(line, "words", None)
+                    if words is None and isinstance(line, dict):
+                        words = line.get("words", [])
+                    if not words:
+                        continue
+                    xs1, ys1, xs2, ys2, wtexts = [], [], [], [], []
+                    for w in words:
+                        r = getattr(w, "bounding_rect", None) or (w.get("bounding_rect") if isinstance(w, dict) else None)
+                        wt = getattr(w, "text", None) or (w.get("text") if isinstance(w, dict) else "")
+                        if r is not None:
+                            rx = getattr(r, "x", None) if not isinstance(r, dict) else r.get("x", 0)
+                            ry = getattr(r, "y", None) if not isinstance(r, dict) else r.get("y", 0)
+                            rw = getattr(r, "width", None) if not isinstance(r, dict) else r.get("width", 0)
+                            rh = getattr(r, "height", None) if not isinstance(r, dict) else r.get("height", 0)
+                            xs1.append(rx)
+                            ys1.append(ry)
+                            xs2.append(rx + rw)
+                            ys2.append(ry + rh)
+                        if wt:
+                            wtexts.append(str(wt))
+                    text = getattr(line, "text", None) or (line.get("text") if isinstance(line, dict) else "") or " ".join(wtexts)
+                    if text and str(text).strip() and xs1:
+                        items.append({
+                            "text": str(text).strip(),
+                            "x": round((min(xs1) + max(xs2)) / 2),
+                            "y": round((min(ys1) + max(ys2)) / 2),
+                        })
+            except Exception:
+                continue
+    except ImportError:
+        pass
+
+    # 2) เสริมด้วยข้อความจากหน้าต่างหน้าสุดผ่าน Win32 EnumChildWindows และ UIAutomation (เผื่อเครื่องไม่มีชุดภาษาไทยของ Windows OCR)
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if hwnd:
+            class _RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+            def _read_hwnd(h: int) -> None:
+                if not ctypes.windll.user32.IsWindowVisible(h):
+                    return
+                n = ctypes.windll.user32.GetWindowTextLengthW(h)
+                if n > 0:
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    ctypes.windll.user32.GetWindowTextW(h, buf, n + 1)
+                    txt = buf.value.strip()
+                    if txt:
+                        rc = _RECT()
+                        if ctypes.windll.user32.GetWindowRect(h, ctypes.byref(rc)) and (rc.right > rc.left) and (rc.bottom > rc.top):
+                            items.append({"text": txt, "x": round((rc.left + rc.right) / 2), "y": round((rc.top + rc.bottom) / 2)})
+
+            _read_hwnd(hwnd)
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def _enum_cb(ch, _lparam):
+                _read_hwnd(ch)
+                return True
+            ctypes.windll.user32.EnumChildWindows(hwnd, WNDENUMPROC(_enum_cb), 0)
+    except Exception:
+        pass
+
+    try:
+        import uiautomation as auto
+        with auto.UIAutomationInitializerInThread():
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            win = auto.ControlFromHandle(hwnd) if hwnd else auto.GetForegroundControl()
+            if win:
+                sw, sh = screen_size()
+                stack, seen = [(win, 0)], 0
+                while stack and seen < 800:
+                    el, depth = stack.pop()
+                    seen += 1
+                    try:
+                        rect = el.BoundingRectangle
+                        if rect and rect.width() > 2 and rect.height() > 2:
+                            x, y = round((rect.left + rect.right) / 2), round((rect.top + rect.bottom) / 2)
+                            if 0 <= x <= sw and 0 <= y <= sh:
+                                name = str(el.Name or "").strip()
+                                if name:
+                                    items.append({"text": name, "x": x, "y": y})
+                        if depth < 12:
+                            for child in reversed(el.GetChildren() or []):
+                                stack.append((child, depth + 1))
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    # ลบข้อความที่ตำแหน่งเดียวกันซ้ำ (เช่น ตัวเลข/อังกฤษที่ทั้ง th และ en หรือ UIA อ่านเจอเหมือนกัน)
+    dedup = []
+    for it in sorted(items, key=lambda it: (it["y"] // 12, it["x"])):
+        if not any(abs(it["x"] - d["x"]) < 16 and abs(it["y"] - d["y"]) < 12 and it["text"] == d["text"] for d in dedup):
+            dedup.append(it)
+    return dedup[:max_items]
+
+
 def ocr_screen(max_items: int = 120) -> list[dict]:
-    """ถ่ายภาพจอหลักแล้วให้ Vision อ่านข้อความ (ไทย+อังกฤษ) คืน [{text, x, y}] (ตำแหน่งกลางกล่อง หน่วยจุดบนจอ)"""
+    """ถ่ายภาพจอหลักแล้วให้ OCR อ่านข้อความ (ไทย+อังกฤษ) คืน [{text, x, y}] (ตำแหน่งกลางกล่อง หน่วยจุดบนจอ)"""
+    if IS_WIN:
+        return _win_ocr_screen(max_items)
     import Quartz
     import Vision
     if not screen_permission_ok():
@@ -218,8 +373,33 @@ def ocr_screen(max_items: int = 120) -> list[dict]:
     return items[:max_items]
 
 
+def _win_proc_name(pid: int) -> str:
+    """หาชื่อไฟล์ .exe จาก PID บน Windows"""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(1024)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+    return ""
+
+
 def frontmost() -> tuple[str, int]:
-    """แอปที่อยู่หน้าสุดจริง (ดูจากลำดับหน้าต่างบนจอ; NSWorkspace อาจค้างค่าเก่าถ้าไม่มี run loop ของ AppKit)"""
+    """แอปที่อยู่หน้าสุดจริง คืน (ชื่อแอป, pid)"""
+    if IS_WIN:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        pid = ctypes.c_ulong(0)
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        exe = _win_proc_name(pid.value).removesuffix(".exe")
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+        return (exe or buf.value or "Windows"), int(pid.value)
     import Quartz
     opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
     for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:
@@ -232,6 +412,14 @@ def frontmost() -> tuple[str, int]:
 
 def focused_is_secure() -> bool:
     """ช่องที่กำลังพิมพ์เป็นช่องรหัสผ่านไหม (ด่านในโค้ด ไม่พึ่งแค่คำสั่งใน prompt)"""
+    if IS_WIN:
+        try:
+            import uiautomation as auto
+            with auto.UIAutomationInitializerInThread():
+                el = auto.GetFocusedControl()
+                return bool(el and getattr(el, "IsPassword", False))
+        except Exception:
+            return False
     import ApplicationServices as AS
     el = _ax(AS.AXUIElementCreateSystemWide(), "AXFocusedUIElement")
     return el is not None and str(_ax(el, "AXSubrole") or "") == "AXSecureTextField"
@@ -243,8 +431,78 @@ def _ax(el, attr):
     return value if err == 0 else None
 
 
+def _win_ax_elements(pid: int, limit: int = 70) -> tuple[str, list[dict]]:
+    """อ่านปุ่ม/ช่องกรอกของหน้าต่างหน้าสุดบน Windows ด้วย UIAutomation"""
+    try:
+        import uiautomation as auto
+        with auto.UIAutomationInitializerInThread():
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            win = auto.ControlFromHandle(hwnd) if hwnd else auto.GetForegroundControl()
+            if not win:
+                return "", []
+            title = str(win.Name or "")
+            sw, sh = screen_size()
+            out, stack, seen = [], [(win, 0)], 0
+            while stack and len(out) < limit and seen < 1500:
+                el, depth = stack.pop()
+                seen += 1
+                try:
+                    ctype = str(el.ControlTypeName or "")
+                    rect = el.BoundingRectangle
+                    children = el.GetChildren() or [] if depth < 15 else []
+                    if rect and rect.width() > 2 and rect.height() > 2:
+                        x, y = round((rect.left + rect.right) / 2), round((rect.top + rect.bottom) / 2)
+                        name = str(el.Name or "").strip()
+                        if 0 <= x <= sw and 0 <= y <= sh and (ctype in WIN_ACTIONABLE or (ctype == "PaneControl" and name and not children)):
+                            role = "Button" if ctype == "PaneControl" else ctype.removesuffix("Control")
+                            out.append({"role": role, "name": name[:60], "x": x, "y": y, "el": el})
+                    if depth < 15:
+                        for child in reversed(children):
+                            stack.append((child, depth + 1))
+                except Exception:
+                    continue
+            return title, out
+    except Exception:
+        return "", []
+
+
+def _win_invoke_element(el) -> bool:
+    """กดปุ่มผ่าน UIAutomation หรือ Win32 Message โดยไม่ขยับเมาส์จริง"""
+    try:
+        import uiautomation as auto
+        with auto.UIAutomationInitializerInThread():
+            try:
+                inv = el.GetInvokePattern()
+                if inv:
+                    inv.Invoke()
+                    return True
+            except Exception:
+                pass
+            try:
+                leg = el.GetLegacyIAccessiblePattern()
+                if leg:
+                    leg.DoDefaultAction()
+                    return True
+            except Exception:
+                pass
+            hwnd = getattr(el, "NativeWindowHandle", 0)
+            if hwnd:
+                rect = el.BoundingRectangle
+                cx = max(2, int(rect.width() // 2)) if rect else 10
+                cy = max(2, int(rect.height() // 2)) if rect else 10
+                lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
+                ctypes.windll.user32.PostMessageW(hwnd, 0x0201, 1, lparam)  # WM_LBUTTONDOWN
+                ctypes.windll.user32.PostMessageW(hwnd, 0x0202, 0, lparam)  # WM_LBUTTONUP
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def ax_elements(pid: int, limit: int = 70) -> tuple[str, list[dict]]:
     """ปุ่ม/ช่องกรอก/เมนูของหน้าต่างหน้าสุด (ต้องมีสิทธิ์ Accessibility) คืน (ชื่อหน้าต่าง, [{role, name, x, y, el}])"""
+    if IS_WIN:
+        return _win_ax_elements(pid, limit)
     import ApplicationServices as AS
     app = AS.AXUIElementCreateApplication(pid)
     win = _ax(app, "AXFocusedWindow") or _ax(app, "AXMainWindow") or next(iter(_ax(app, "AXWindows") or []), None)
@@ -293,6 +551,8 @@ def _intersect(a, b):
 
 
 def is_terminal(pid: int) -> bool:
+    if IS_WIN:
+        return _win_proc_name(pid).lower() in WIN_TERMINALS
     import AppKit
     app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
     return app is not None and str(app.bundleIdentifier() or "") in TERMINAL_BUNDLES
@@ -303,7 +563,27 @@ def wants_submit(value) -> bool:
     return value is True or str(value).strip().lower() == "true"
 
 
-# ── เมาส์และคีย์บอร์ด (Quartz CGEvent) ────────────────────────────────────────
+# ── เมาส์และคีย์บอร์ด (Quartz CGEvent บน macOS / Win32 SendInput บน Windows) ────────────────
+
+if IS_WIN:
+    class _MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", ctypes.c_ulong),
+                    ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    class _KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort), ("dwFlags", ctypes.c_ulong),
+                    ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
+
+    class _INPUT(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_ulong), ("u", _INPUT_UNION)]
+
+    def _win_send_key(vk: int = 0, scan: int = 0, flags: int = 0) -> None:
+        inp = _INPUT(type=1, u=_INPUT_UNION(ki=_KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=None)))
+        ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
 
 def _post(event) -> None:
     import Quartz
@@ -311,11 +591,22 @@ def _post(event) -> None:
 
 
 def mouse_move(x: float, y: float) -> None:
+    if IS_WIN:
+        ctypes.windll.user32.SetCursorPos(int(round(x)), int(round(y)))
+        return
     import Quartz
     _post(Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (x, y), Quartz.kCGMouseButtonLeft))
 
 
 def mouse_click(x: float, y: float, count: int = 1) -> None:
+    if IS_WIN:
+        mouse_move(x, y)
+        time.sleep(0.05)
+        for _ in range(count):
+            ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+            ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+            time.sleep(0.05)
+        return
     import Quartz
     mouse_move(x, y)
     time.sleep(0.05)
@@ -329,6 +620,15 @@ def mouse_click(x: float, y: float, count: int = 1) -> None:
 
 def type_unicode(text: str) -> None:
     """พิมพ์ข้อความใดๆ (รวมภาษาไทย) โดยไม่ขึ้นกับแป้นพิมพ์ที่ตั้งไว้"""
+    if IS_WIN:
+        for ch in text:
+            data = ch.encode("utf-16-le")
+            for i in range(0, len(data), 2):
+                code = int.from_bytes(data[i:i + 2], "little")
+                _win_send_key(0, code, 0x0004)          # KEYEVENTF_UNICODE
+                _win_send_key(0, code, 0x0004 | 0x0002) # KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        time.sleep(0.02)
+        return
     import Quartz
     chunks, cur = [], ""
     for ch in text:                                   # ทีละไม่เกิน 16 หน่วย UTF-16 (อีโมจิกิน 2 หน่วย)
@@ -348,14 +648,33 @@ def type_unicode(text: str) -> None:
 
 
 def press_keys(combo: str) -> None:
-    """เช่น "cmd+s", "return", "shift+tab" """
+    """เช่น "cmd+s" (บน Windows แปลง cmd เป็น Ctrl อัตโนมัติ), "return", "shift+tab" """
+    parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
+    key = parts[-1] if parts else ""
+    if IS_WIN:
+        if key not in WIN_VK:
+            raise ValueError(f"ไม่รู้จักปุ่ม {key}")
+        # บน Windows คำสั่งมาตรฐานอย่าง cmd+s, cmd+a, cmd+w ใช้ Ctrl แทน
+        mod_map = {"cmd": 0x11, "command": 0x11, "⌘": 0x11, "ctrl": 0x11, "control": 0x11, "⌃": 0x11,
+                   "shift": 0x10, "⇧": 0x10, "alt": 0x12, "option": 0x12, "opt": 0x12, "⌥": 0x12,
+                   "win": 0x5B, "meta": 0x5B}
+        mods = []
+        for mod in parts[:-1]:
+            if mod not in mod_map:
+                raise ValueError(f"ไม่รู้จักปุ่ม {mod}")
+            mods.append(mod_map[mod])
+        for m in mods:
+            _win_send_key(m, 0, 0)
+        _win_send_key(WIN_VK[key], 0, 0)
+        _win_send_key(WIN_VK[key], 0, 0x0002)
+        for m in reversed(mods):
+            _win_send_key(m, 0, 0x0002)
+        return
     import Quartz
     flags_map = {"cmd": Quartz.kCGEventFlagMaskCommand, "command": Quartz.kCGEventFlagMaskCommand,
                  "shift": Quartz.kCGEventFlagMaskShift, "alt": Quartz.kCGEventFlagMaskAlternate,
                  "option": Quartz.kCGEventFlagMaskAlternate, "ctrl": Quartz.kCGEventFlagMaskControl,
                  "control": Quartz.kCGEventFlagMaskControl}
-    parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
-    key = parts[-1] if parts else ""
     if key not in KEYCODES:
         raise ValueError(f"ไม่รู้จักปุ่ม {key}")
     flags_map |= {"opt": flags_map["alt"], "⌥": flags_map["alt"], "⌘": flags_map["cmd"], "meta": flags_map["cmd"],
@@ -372,6 +691,10 @@ def press_keys(combo: str) -> None:
 
 
 def scroll_wheel(direction: str, amount: int = 5) -> None:
+    if IS_WIN:
+        clicks = max(1, min(10, amount)) * (-120 if direction == "down" else 120)
+        ctypes.windll.user32.mouse_event(0x0800, 0, 0, clicks, 0)  # MOUSEEVENTF_WHEEL
+        return
     import Quartz
     lines = max(1, min(10, amount)) * (-3 if direction == "down" else 3)
     _post(Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, lines))
@@ -382,7 +705,7 @@ def scroll_wheel(direction: str, amount: int = 5) -> None:
 class ComputerAgent:
     def __init__(self, chat, log=print, web=None, exclude=None):
         """web = BrowserAgent (Playwright) — งานบนเว็บส่งต่อให้ตัวนั้น แม่นกว่าคลิกตามภาพ และไม่ต้องขยับเมาส์จริง
-        exclude() = กรอบ (x, y, w, h) บนจอที่ต้องไม่มองและไม่คลิก (หน้าต่าง HUD ของน้องจางเอง)"""
+        exclude() = กรอบ (x, y, w, h) บนจอที่ต้องไม่มองและไม่คลิก (หน้าต่าง HUD ของจางวิทเอง)"""
         self.chat, self.log, self.web, self.exclude = chat, log, web, exclude
         self.targets: dict[str, dict] = {}
         self.last_web = None
@@ -428,7 +751,7 @@ class ComputerAgent:
             return self.observe()
         if name == "web_task":
             if self.web is None:
-                return "ใช้เบราว์เซอร์ของน้องจางไม่ได้ ให้ทำผ่านจอแทน\n" + self.observe()
+                return "ใช้เบราว์เซอร์ของจางวิทไม่ได้ ให้ทำผ่านจอแทน\n" + self.observe()
             self.last_web = self.web.run(str(args.get("task", "")), cancel)
             return f"ผลจากเบราว์เซอร์: {self.last_web or '(ถูกยกเลิก)'}\n" + self.observe()
         if name in ("type_text", "press_key"):
@@ -446,32 +769,48 @@ class ComputerAgent:
         prefix = ""
         if name == "open_app":
             app_name = str(args.get("name", "")).strip()
-            # Chrome: -n = ตัวของผู้ใช้เสมอ (ไม่งั้นอาจไปโผล่ใน Chrome โปรไฟล์แยกของเอเจนต์เว็บ)
-            cmd = user_chrome_cmd() if app_name == "Google Chrome" else ["open", "-a", app_name]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if r.returncode != 0:
-                return (f"เปิดแอป {app_name} ไม่ได้: {(r.stderr or '').strip()[:200]} "
-                        "(ลองชื่อเต็มภาษาอังกฤษของแอป เช่น Visual Studio Code)\n" + self.observe())
-            import AppKit
-            path = AppKit.NSWorkspace.sharedWorkspace().fullPathForApplication_(app_name)
-            for _ in range(8):                               # รอแอปขึ้นมาหน้าสุด (ชื่อบนจอเป็นภาษาไทย → เทียบที่อยู่แอป)
-                time.sleep(0.25)
-                fname, fpid = frontmost()
-                front = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(fpid)
-                url = front.bundleURL() if front is not None else None
-                if (path and url is not None and str(url.path()) == str(path)) or app_name.lower() in fname.lower():
-                    break
+            if IS_WIN:
+                win_map = {"Finder": "explorer", "Notes": "notepad", "Terminal": "wt", "Calculator": "calc",
+                           "System Settings": "ms-settings:", "Visual Studio Code": "code",
+                           "Microsoft Edge": "msedge", "Safari": "msedge"}
+                target_cmd = win_map.get(app_name, app_name)
+                cmd = user_chrome_cmd() if app_name == "Google Chrome" else ["cmd", "/c", "start", "", target_cmd]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if r.returncode != 0:
+                    return f"เปิดแอป {app_name} ไม่ได้: {(r.stderr or '').strip()[:200]}\n" + self.observe()
+                time.sleep(0.8)
+            else:
+                # Chrome: -n = ตัวของผู้ใช้เสมอ (ไม่งั้นอาจไปโผล่ใน Chrome โปรไฟล์แยกของเอเจนต์เว็บ)
+                cmd = user_chrome_cmd() if app_name == "Google Chrome" else ["open", "-a", app_name]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if r.returncode != 0:
+                    return (f"เปิดแอป {app_name} ไม่ได้: {(r.stderr or '').strip()[:200]} "
+                            "(ลองชื่อเต็มภาษาอังกฤษของแอป เช่น Visual Studio Code)\n" + self.observe())
+                import AppKit
+                path = AppKit.NSWorkspace.sharedWorkspace().fullPathForApplication_(app_name)
+                for _ in range(8):                               # รอแอปขึ้นมาหน้าสุด (ชื่อบนจอเป็นภาษาไทย → เทียบที่อยู่แอป)
+                    time.sleep(0.25)
+                    fname, fpid = frontmost()
+                    front = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(fpid)
+                    url = front.bundleURL() if front is not None else None
+                    if (path and url is not None and str(url.path()) == str(path)) or app_name.lower() in fname.lower():
+                        break
         elif name in ("click", "double_click", "move_mouse"):
             target = self._target(args.get("target", ""))
             if name == "click" and "el" in target:           # ปุ่มจาก Accessibility → กดตรงๆ ไม่ต้องขยับเมาส์ (ไม่ติด HUD)
-                import ApplicationServices as AS
-                err = AS.AXUIElementPerformAction(target["el"], "AXPress")
-                # สำเร็จ หรือแอปรับไปแล้วแต่ตอบช้า → ห้ามคลิกซ้ำด้วยเมาส์ (กดสองครั้ง)
-                if err in (AS.kAXErrorSuccess, AS.kAXErrorCannotComplete):
-                    time.sleep(0.6)
-                    return self.observe()
-            if self._excluded(target["x"], target["y"]):     # เมาส์จริงห้ามลงบนหน้าต่างของน้องจางเอง
-                return "ปฏิเสธ: ตรงนั้นเป็นหน้าต่างของน้องจางเอง\n" + self.observe()
+                if IS_WIN:
+                    if _win_invoke_element(target["el"]):
+                        time.sleep(0.6)
+                        return self.observe()
+                else:
+                    import ApplicationServices as AS
+                    err = AS.AXUIElementPerformAction(target["el"], "AXPress")
+                    # สำเร็จ หรือแอปรับไปแล้วแต่ตอบช้า → ห้ามคลิกซ้ำด้วยเมาส์ (กดสองครั้ง)
+                    if err in (AS.kAXErrorSuccess, AS.kAXErrorCannotComplete):
+                        time.sleep(0.6)
+                        return self.observe()
+            if self._excluded(target["x"], target["y"]):     # เมาส์จริงห้ามลงบนหน้าต่างของจางวิทเอง
+                return "ปฏิเสธ: ตรงนั้นเป็นหน้าต่างของจางวิทเอง\n" + self.observe()
             if name == "move_mouse":
                 mouse_move(target["x"], target["y"])
                 prefix = "ขยับเมาส์แล้ว\n"
@@ -593,12 +932,28 @@ DANGER_RE = re.compile(
     r"erase|format\b|don.?t save|replace|revert|discard|uninstall|reset)", re.I)
 # แอปแชท/อีเมล: Enter = ส่งข้อความ
 SEND_APPS = {"jp.naver.line.mac", "com.apple.MobileSMS", "com.apple.mail", "com.tinyspeck.slackmacgap",
-             "com.hnc.Discord", "com.microsoft.teams2", "ru.keepcoder.Telegram", "net.whatsapp.WhatsApp"}
+             "com.hnc.Discord", "com.microsoft.teams2", "ru.keepcoder.Telegram", "net.whatsapp.WhatsApp",
+             "line.exe", "slack.exe", "discord.exe", "ms-teams.exe", "teams.exe", "telegram.exe", "whatsapp.exe", "olk.exe", "outlook.exe"}
 TEXT_ROLES = {"AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"}
+WIN_TEXT_ROLES = {"EditControl", "DocumentControl", "ComboBoxControl"}
 
 
 def focused_text_field() -> str | None:
     """ช่องพิมพ์ที่กำลังโฟกัสอยู่ (None = ไม่มีช่องพิมพ์ถูกเลือก พิมพ์ไปก็ไม่รู้ไปลงไหน)"""
+    if IS_WIN:
+        try:
+            import uiautomation as auto
+            with auto.UIAutomationInitializerInThread():
+                el = auto.GetFocusedControl()
+                if not el:
+                    return None
+                ctype = str(el.ControlTypeName or "")
+                if ctype not in WIN_TEXT_ROLES:
+                    return None
+                name = str(el.Name or "").strip()
+                return f"{ctype.removesuffix('Control')} \"{name[:40]}\""
+        except Exception:
+            return None
     import ApplicationServices as AS
     el = _ax(AS.AXUIElementCreateSystemWide(), "AXFocusedUIElement")
     role = str(_ax(el, "AXRole") or "") if el is not None else ""
@@ -609,6 +964,8 @@ def focused_text_field() -> str | None:
 
 
 def front_bundle() -> str:
+    if IS_WIN:
+        return _win_proc_name(frontmost()[1]).lower()
     import AppKit
     app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(frontmost()[1])
     return str(app.bundleIdentifier() or "") if app is not None else ""
@@ -670,7 +1027,10 @@ class JevComputerAgent(ComputerAgent):
         cancel = cancel or threading.Event()
         if not accessibility_ok(prompt=True):
             raise PermissionError(permission_message("ax"))
-        from typesafe_sdk import Choice
+        try:
+            from typesafe_sdk import Choice
+        except ImportError:
+            from jarvis import Choice
         started, done_steps, seen = time.monotonic(), [], {}
         typed, self.last_web = None, None
         self.observe()
@@ -788,7 +1148,7 @@ class JevComputerAgent(ComputerAgent):
 
 def describe_screen(chat, question: str = "", exclude=None) -> str:
     """อ่านจอแบบเร็ว (ไม่ขยับเมาส์): OCR แล้วให้ LLM สรุปเป็นภาษาพูด
-    exclude() = กรอบ HUD ของน้องจาง ไม่อ่านข้อความตัวเอง (กรองก่อนตัดจำนวน จะได้ไม่เบียดของจริงออก)"""
+    exclude() = กรอบ HUD ของจางวิท ไม่อ่านข้อความตัวเอง (กรองก่อนตัดจำนวน จะได้ไม่เบียดของจริงออก)"""
     app, _ = frontmost()
     box = exclude() if exclude else None
     inside = lambda t: bool(box) and box[0] <= t["x"] <= box[0] + box[2] and box[1] <= t["y"] <= box[1] + box[3]

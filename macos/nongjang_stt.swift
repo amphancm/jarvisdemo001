@@ -1,7 +1,7 @@
 // Persistent on-device Thai STT helper for jarvis.py (macOS 26+, SpeechAnalyzer + DictationTranscriber).
 // stdin : repeated frames  [uint32 LE byte-count][int16 LE PCM, 16 kHz mono]   (count 0 = quit)
 // stdout: one JSON line per frame {"text": "...", "ms": 42}; first line {"ready": true, ...}
-// argv  : optional contextual strings (bias words), e.g.  nongjang-stt น้องจาง
+// argv  : optional contextual strings (bias words), e.g.  nongjang-stt จางวิท
 import Foundation
 import Speech
 import AVFoundation

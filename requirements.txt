@@ -12,9 +12,20 @@ livekit>=1.1.20,<2              # WebRTC AEC (rtc.AudioProcessingModule) ตั�
 # ── ท่องเว็บ ──────────────────────────────────────────────
 playwright>=1.50                # ขับ Google Chrome ที่ติดตั้งอยู่ผ่าน CDP
 
-# ── STT ในเครื่อง: Apple Silicon ใช้ MLX, เครื่องอื่นใช้ faster-whisper (CPU int8) ──
+# ── STT ในเครื่อง: Apple Silicon ใช้ MLX, เครื่องอื่นใช้ faster-whisper (CPU int8 / CUDA) ──
 mlx-whisper>=0.4.3 ; sys_platform == "darwin" and platform_machine == "arm64"
 faster-whisper>=1.2.1 ; sys_platform != "darwin" or platform_machine != "arm64"
+
+# ── Windows 11 (TTS, เสียงระบบ, ไอคอน System Tray, หน้าจอ HUD, อ่านจอ OCR + Accessibility) ──
+edge-tts>=7.0 ; sys_platform == "win32"
+miniaudio>=1.60 ; sys_platform == "win32"
+pycaw>=20240210 ; sys_platform == "win32"
+comtypes>=1.4 ; sys_platform == "win32"
+Pillow>=10.0 ; sys_platform == "win32"
+pystray>=0.19 ; sys_platform == "win32"
+pywebview>=5.0 ; sys_platform == "win32"
+uiautomation>=2.0 ; sys_platform == "win32"
+winocr>=0.0.12 ; sys_platform == "win32"
 
 # ── ไอคอนบนแถบเมนู (macOS) ───────────────────────────────
 pyobjc-framework-Cocoa>=11 ; sys_platform == "darwin"
