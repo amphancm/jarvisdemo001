@@ -1,41 +1,69 @@
-#!/bin/zsh
-# เปิดน้องจางเป็นแอปของตัวเอง แล้วโชว์ log สดในเทอร์มินัลนี้ (Ctrl+C = ปิดน้องจาง)
-# ใช้แทน `python jarvis.py` เมื่ออยากให้สิทธิ์ไมค์/อ่านจอ/คุมเครื่อง ผูกกับแอป "น้องจาง" แทนแอปเทอร์มินัล
+#!/usr/bin/env bash
+# จางวิท (Jarvis) — Thai Voice & Automation Assistant บน Ubuntu 26.04 LTS
+# รันโปรแกรมในเทอร์มินัลนี้ (กด Ctrl+C เพื่อหยุดการทำงานอย่างปลอดภัย)
+
+set -e
 cd "$(dirname "$0")"
-[[ -x Jarvis.app/Contents/MacOS/Jarvis ]] || ./macos/build_app.sh
+
 mkdir -p logs
-: >> logs/jarvis.log
-APP="${PWD:A}/Jarvis.app"                               # :A = ที่อยู่จริง (ไม่ผ่าน symlink)
-LAUNCHER="$APP/Contents/MacOS/Jarvis"
-LPAT="^$(printf '%s' "$LAUNCHER" | sed 's/[][\\.*^$+?(){}|]/\\&/g')"   # ใช้กับ pgrep/pkill แบบไม่ตีความ . ( ) เป็น regex
 
-# ./run_app.sh --selftest = ทดสอบอ่านจอ/เมาส์/คีย์บอร์ดด้วยสิทธิ์ของแอปน้องจาง (เปิดอีกตัวชั่วคราว ไม่ยุ่งตัวที่ฟังอยู่)
-if [[ "$1" == "--selftest" ]]; then
-  rm -f logs/selftest.log
-  open -n -W --env JARVIS_SELFTEST=1 "$APP"
-  cat logs/selftest.log 2>/dev/null || { echo "ไม่มีผลทดสอบ ดู logs/jarvis.log"; tail -20 logs/jarvis.log; exit 1; }
-  ! grep -q "^❌" logs/selftest.log
-  exit $?
-fi
-
-TAIL=
-stop() {
-  [[ -n $TAIL ]] && kill $TAIL 2>/dev/null
-  pkill -TERM -f "$LPAT" 2>/dev/null
-  echo "\n👋 ปิดน้องจางแล้ว"
-  exit 0
-}
-trap stop INT TERM HUP
-
-if pgrep -f "$LPAT" >/dev/null; then
-  echo "น้องจางเปิดอยู่แล้ว — แสดง log ต่อ"
+# เลือก Python จาก .venv หากมีอยู่ มิฉะนั้นใช้ python3 ของระบบ
+if [ -x ".venv/bin/python3" ]; then
+    PYTHON=".venv/bin/python3"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
 else
-  open "$APP"
+    echo "❌ ไม่พบ python3 ในระบบ กรุณาติดตั้ง python3"
+    exit 1
 fi
-tail -n 0 -F logs/jarvis.log &
-TAIL=$!
-# ถ้าน้องจางปิดเอง (เช่น เลือก "ออก" จากเมนูบาร์) ก็เลิกโชว์ log ด้วย
-sleep 3
-while pgrep -f "$LPAT" >/dev/null; do sleep 1; done
-kill $TAIL 2>/dev/null
-echo "\n👋 น้องจางปิดแล้ว"
+
+export PYTHONUNBUFFERED=1
+
+# หากระบุ --selftest ให้รัน selftest.py ทันที
+if [ "$1" = "--selftest" ]; then
+    shift
+    echo "🧪 กำลังเริ่มการทดสอบระบบ (Selftest)..."
+    exec "$PYTHON" selftest.py "$@"
+fi
+
+# ตรวจสอบแพ็กเกจถอดเสียงและระบบเสียง (faster-whisper, sounddevice, edge-tts)
+if ! "$PYTHON" -c "import faster_whisper, sounddevice, edge_tts" >/dev/null 2>&1; then
+    echo "⚠️  ตรวจพบว่ายังไม่ได้ติดตั้งแพ็กเกจ Python ที่จำเป็น (เช่น faster-whisper, sounddevice, edge-tts)"
+    if [ -x ".venv/bin/pip" ]; then
+        echo "📦 กำลังติดตั้งแพ็กเกจจาก requirements.txt อัตโนมัติด้วย .venv/bin/pip..."
+        .venv/bin/pip install -r requirements.txt
+    elif command -v pip3 >/dev/null 2>&1; then
+        echo "📦 กำลังติดตั้งแพ็กเกจจาก requirements.txt ด้วย pip3..."
+        pip3 install -r requirements.txt
+    else
+        echo ""
+        echo "❌ ยังไม่มี pip และแพ็กเกจที่จำเป็นบนระบบ Ubuntu 26.04"
+        echo "กรุณารัน 3 คำสั่งนี้ในเทอร์มินัลเพื่อติดตั้ง:"
+        echo ""
+        echo "    sudo apt update && sudo apt install -y python3-pip python3-venv libportaudio2 ffmpeg"
+        echo "    rm -rf .venv && python3 -m venv --system-site-packages .venv"
+        echo "    .venv/bin/pip install -r requirements.txt"
+        echo ""
+        exit 1
+    fi
+fi
+
+# จัดการสัญญาณหยุดโปรแกรมอย่างนุ่มนวล
+JARVIS_PID=""
+cleanup() {
+    echo ""
+    echo "👋 ได้รับสัญญาณหยุด กำลังปิดจางวิท..."
+    if [ -n "$JARVIS_PID" ] && kill -0 "$JARVIS_PID" 2>/dev/null; then
+        kill -TERM "$JARVIS_PID" 2>/dev/null || true
+        wait "$JARVIS_PID" 2>/dev/null || true
+    fi
+    echo "👋 ปิดจางวิทเรียบร้อยแล้ว"
+    exit 0
+}
+trap cleanup INT TERM HUP
+
+# รันจางวิทและส่งต่อพารามิเตอร์ทั้งหมด (เช่น --text, --eval, --wav, --mic)
+"$PYTHON" jarvis.py "$@" &
+JARVIS_PID=$!
+
+wait "$JARVIS_PID"

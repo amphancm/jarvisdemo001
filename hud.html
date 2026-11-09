@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HUD ของน้องจาง: วงแหวนแบบ J.A.R.V.I.S ขยับตามเสียง (jarvis.py เรียก hud.update({...}) ทุก ~50 ms) -->
+<!-- HUD ของจางวิท: วงแหวนแบบ J.A.R.V.I.S ขยับตามเสียง (jarvis.py เรียก hud.update({...}) ทุก ~50 ms) -->
 <html lang="th">
 <head>
 <meta charset="utf-8">
@@ -18,11 +18,11 @@
 </style>
 </head>
 <body>
-<div id="wrap">
+<div id="wrap" class="pywebview-drag-region">
   <canvas id="c" width="720" height="720"></canvas>
   <div id="lines" class="empty">
     <div class="row"><span class="who">คุณ</span><span id="heard"></span></div>
-    <div class="row"><span class="who">น้องจาง</span><span id="reply"></span></div>
+    <div class="row"><span class="who">จางวิท</span><span id="reply"></span></div>
   </div>
 </div>
 <script>
@@ -123,6 +123,12 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+window.addEventListener("dblclick", () => {
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.toggle_listen) {
+    window.pywebview.api.toggle_listen();
+  }
+});
 </script>
 </body>
 </html>

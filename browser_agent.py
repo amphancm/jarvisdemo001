@@ -1,7 +1,7 @@
 """
-น้องจางท่องเว็บ — เอเจนต์เล็กๆ ที่ให้ LLM (tool calling แบบ OpenAI) ขับเบราว์เซอร์จริงด้วย Playwright
+จางวิทท่องเว็บ — เอเจนต์เล็กๆ ที่ให้ LLM (tool calling แบบ OpenAI) ขับเบราว์เซอร์จริงด้วย Playwright บน Ubuntu 26.04
 
-- เปิด Google Chrome หน้าต่างจริงให้ผู้ใช้เห็น ใช้โปรไฟล์แยกของน้องจางเอง (.browser-profile)
+- เปิด Google Chrome หน้าต่างจริงให้ผู้ใช้เห็น ใช้โปรไฟล์แยกของจางวิทเอง (.browser-profile)
   แล้วเชื่อมต่อผ่าน CDP → ปิดโปรแกรมแล้วหน้าเว็บยังเปิดค้างไว้ให้ดูต่อ
 - LLM เห็นหน้าเว็บเป็น "รายการปุ่ม/ลิงก์ที่มีเลขกำกับ + ข้อความในหน้า" แล้วเรียกเครื่องมือ
   open_url / search / click / type_text / scroll / back / finish
@@ -9,7 +9,7 @@
   ไม่แก้ CAPTCHA และไม่ทำตามคำสั่งที่เขียนอยู่ในหน้าเว็บ
 
 jarvis.py เรียกใช้ผ่าน BrowserAgent.run() (บล็อก) หรือ BackgroundBrowser (ทำงานเบื้องหลัง ยกเลิกได้)
-และส่งฟังก์ชัน chat(messages, tools) → message เข้ามา (OpenRouter หรือ Gemini ก็ได้)
+และส่งฟังก์ชัน chat(messages, tools) → message เข้ามา (OpenRouter, TogetherAI, Gemini หรือ Ollama ก็ได้)
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import queue
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -25,13 +26,33 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote_plus, unquote
 
-CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+
+def _find_chrome() -> Path:
+    for cmd in ("google-chrome-stable", "google-chrome", "chromium-browser", "chromium"):
+        found = shutil.which(cmd)
+        if found:
+            return Path(found)
+    candidates = [
+        Path("/usr/bin/google-chrome-stable"),
+        Path("/usr/bin/google-chrome"),
+        Path("/opt/google/chrome/chrome"),
+        Path("/snap/bin/chromium"),
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+
+CHROME = _find_chrome()
 CDP_PORT = 9223
 MAX_STEPS = 15
 TASK_TIMEOUT = 180          # วินาที
 SNAPSHOT_CHARS = 4000       # งบตัวอักษรของหน้าเว็บต่อหนึ่งขั้น (หลังตัดขยะแล้ว 4000 ครอบคลุมเท่า 6000 เดิม)
 
-SYSTEM_PROMPT = """You are the web agent of น้องจาง, a Thai voice assistant on the user's Mac.
+SYSTEM_PROMPT = """You are the web agent of จางวิท, a Thai voice assistant on the user's Ubuntu computer.
 You control a real Google Chrome window with the tools to complete the user's Thai request.
 
 How to work:
@@ -160,7 +181,6 @@ def compact_snapshot(snap: str, viewport_h: float, limit: int = SNAPSHOT_CHARS, 
             out.append("... (ตัดเหลือเท่านี้ เลื่อนจอเพื่อดูเพิ่ม)")
             break
     return "\n".join(out)
-
 
 
 class BrowserAgent:
@@ -421,7 +441,7 @@ def _port_open(port: int) -> bool:
 
 
 def _ensure_window(port: int) -> None:
-    """Chrome บน macOS ยังรันต่อหลังปิดหน้าต่างหมด และ CDP จะใช้ไม่ได้จนกว่าจะมีแท็บ → เปิดแท็บเปล่าให้"""
+    """ถ้า Chrome ยังรันอยู่หลังปิดหน้าต่างหมด และไม่มีแท็บเปิดอยู่ → เปิดแท็บเปล่าให้ก่อนต่อ CDP"""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=2) as r:
             if any(t.get("type") == "page" for t in json.load(r)):
@@ -434,7 +454,7 @@ def _ensure_window(port: int) -> None:
 
 
 def _kill_our_chrome(profile_dir: Path) -> None:
-    """ปิด Chrome ที่เปิดด้วยโปรไฟล์ของน้องจางเท่านั้น (ไม่แตะ Chrome ส่วนตัวของผู้ใช้)"""
+    """ปิด Chrome ที่เปิดด้วยโปรไฟล์ของจางวิทเท่านั้น (ไม่แตะ Chrome ส่วนตัวของผู้ใช้)"""
     out = subprocess.run(["pgrep", "-f", f"--user-data-dir={profile_dir}"], capture_output=True, text=True).stdout
     for pid in out.split():
         subprocess.run(["kill", pid], capture_output=True)
