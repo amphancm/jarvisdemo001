@@ -68,6 +68,14 @@ python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
+ถ้าต้องการใช้ Typhoon Whisper Large v3 ให้ติดตั้ง dependencies เพิ่ม แล้วตั้ง `STT_ENGINE=typhoon` ใน `.env`:
+
+```powershell
+.venv\Scripts\pip install -r requirements-typhoon.txt
+```
+
+โมเดลจะดาวน์โหลดประมาณ 6.2 GB ในการเริ่มครั้งแรก และต้องมี RAM/VRAM เพียงพอ
+
 **3. ใส่คีย์** — คัดลอกไฟล์ตั้งค่า แล้วเปิด `.env` ใส่คีย์ `TYPESAFE_API_KEY=` และ `GOOGLE_API_KEY=` (หรือ `OPENROUTER_API_KEY=`)
 
 ```powershell
@@ -99,6 +107,14 @@ copy .env.example .env
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env
 ```
+
+ถ้าต้องการใช้ Typhoon Whisper Large v3 ให้ติดตั้ง dependencies เพิ่มแล้วตั้ง `STT_ENGINE=typhoon` ใน `.env`:
+
+```bash
+.venv/bin/pip install -r requirements-typhoon.txt
+```
+
+โมเดลจะดาวน์โหลดประมาณ 6.2 GB ในการเริ่มครั้งแรก และต้องมี RAM เพียงพอ.
 
 **2. ติดตั้งเสียงภาษาไทย "Kanya"** (ถ้ายังไม่มี)
 System Settings › Accessibility › Spoken Content › System Voice › Manage Voices… › ภาษาไทย › Kanya

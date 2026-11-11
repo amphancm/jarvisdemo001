@@ -71,7 +71,7 @@ cp .env.example .env                        # แล้วใส่ TYPESAFE_API
 ./run_app.sh --selftest                            # ทดสอบอ่านจอ/เมาส์/คีย์บอร์ดกับหน้าต่างทดสอบของตัวเอง (ไม่แตะงานคุณ)
 python jarvis.py                                   # ฟังไมค์ + J.A.R.V.I.S บนจอ (สิทธิ์จะไปผูกกับแอปเทอร์มินัลแทน)
 python jarvis.py --dry-run                         # ฟังและคุยได้ แต่แค่ print คำสั่ง ไม่สั่งเครื่องจริง
-python jarvis.py --text "หยุดเพลงแล้วเปิดสแล็ก"     # สั่งด้วยข้อความ ไม่ใช้ไมค์
+python jarvis.py --text "หยุดเพลงแล้วเปิดสแล็ก"       # สั่งด้วยข้อความ ไม่ใช้ไมค์
 python jarvis.py --eval                            # วัดความแม่นกับชุดประโยคทดสอบภาษาไทย
 python jarvis.py --wav file.wav --dry-run          # ป้อนไฟล์เสียงแทนไมค์ (ทดสอบ VAD + Whisper + คำปลุก)
 ```
@@ -93,7 +93,7 @@ python jarvis.py --wav file.wav --dry-run          # ป้อนไฟล์เ
 | `BARGE_IN` / `SILENCE_MS` / `VAD_THRESHOLD` | `auto` / `550` / `0.5` | การพูดแทรก / เงียบนานเท่าไหร่ถือว่าจบ / ความไวจับเสียงพูด |
 | `EXTRA_APPS` | `auto` | ให้สั่งเปิด/ปิดได้ทุกแอปที่ติดตั้ง |
 | `MENUBAR` / `HUD` | `on` / `on` | ไอคอนแถบเมนู / หน้าจอ J.A.R.V.I.S |
-| `STT_ENGINE` | `auto` | ตัวถอดเสียงหลัก: `auto` = ของ Apple ในเครื่อง (macOS 26+) ไม่งั้น Whisper · `apple` · `whisper` |
+| `STT_ENGINE` | `auto` | ตัวถอดเสียงหลัก: `auto` = Apple (macOS 26+) ไม่งั้น Whisper · `apple` · `whisper` · `typhoon` = `typhoon-ai/typhoon-whisper-large-v3` ผ่าน Transformers (ติดตั้ง `requirements-typhoon.txt`; ดาวน์โหลด ~6.2 GB ครั้งแรก) |
 | `MLX_WHISPER_REPO` / `STT_SECOND_OPINION` | turbo / `auto` | Whisper (ตัวสำรอง) / ถอดซ้ำด้วย Typhoon เมื่อ Jev ไม่มั่นใจ |
 | `SAVE_UTTERANCES` | – | ใส่ชื่อโฟลเดอร์ (เช่น `recordings`) เพื่อเก็บเสียงแต่ละประโยคไว้ทดสอบ (เก็บเสียงทุกคนในห้อง ใช้เท่าที่จำเป็น) |
 | `AGENT_BRAIN` | `jev` | สมองของเอเจนต์คุมคอม: `jev` = Jev เลือกทีละขั้นจากรายการบนจอ (~0.4 วิ/ขั้น) · `llm` = LLM เรียกเครื่องมือ |

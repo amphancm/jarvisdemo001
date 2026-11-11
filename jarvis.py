@@ -388,9 +388,13 @@ FOLLOWUP_SEC = env_float("CONVO_SEC", 30)   # หลังคุยกันแ�
 BROWSER_PROFILE = ROOT / ".browser-profile"   # โปรไฟล์ Chrome แยกของจางวิท (ไม่ยุ่งกับโปรไฟล์หลัก)
 MLX_WHISPER_REPO = env_str("MLX_WHISPER_REPO", "mlx-community/whisper-large-v3-turbo")
 FASTER_WHISPER_MODEL = "large-v3-turbo"
+TYPHOON_WHISPER_REPO = "typhoon-ai/typhoon-whisper-large-v3"
+STT_ENGINE = env_str("STT_ENGINE", "auto").lower()
 # คำใบ้ให้ Whisper: auto = ใช้กับ Whisper ทั่วไป แต่ไม่ใช้กับรุ่นที่จูนไทยมาแล้ว (Typhoon) ซึ่งคำใบ้ทำให้วน
 _prompt_mode = env_str("WHISPER_PROMPT_MODE", "auto").lower()
-USE_WHISPER_PROMPT = _prompt_mode == "on" or (_prompt_mode == "auto" and "typhoon" not in MLX_WHISPER_REPO.lower())
+USE_WHISPER_PROMPT = STT_ENGINE != "typhoon" and (
+    _prompt_mode == "on" or (_prompt_mode == "auto" and "typhoon" not in MLX_WHISPER_REPO.lower())
+)
 SAVE_UTTERANCES = env_str("SAVE_UTTERANCES")           # ใส่โฟลเดอร์ = เก็บเสียงแต่ละประโยคเป็น WAV ไว้ทดสอบ STT
 # เสียงคนคุยกันที่ไม่ได้เรียกจางวิท: ปกติไม่พิมพ์ข้อความลง log (log ของแอปเก็บเป็นไฟล์) · all = พิมพ์ไว้ดีบัก
 LOG_HEARD = env_str("LOG_HEARD", "").lower()
@@ -400,7 +404,6 @@ STT_SECOND = env_str("STT_SECOND_OPINION", "auto")
 TYPHOON_REPO = "chayapats/typhoon-whisper-turbo-mlx"
 # ตัวถอดเสียงหลัก: auto = ตัวถอดเสียงภาษาไทยในเครื่องของ Apple (macOS 26+) ถ้าใช้ได้ ไม่งั้น Whisper
 # วัดกับเสียงจริงของผู้ใช้ 139 ประโยค: Apple ถอดดีกว่า 69 · เท่ากัน 34 · Whisper ดีกว่า 1 · ไวกว่า ~2 เท่า
-STT_ENGINE = env_str("STT_ENGINE", "auto").lower()
 APPLE_STT_SRC = ROOT / "macos" / "nongjang_stt.swift"
 APPLE_STT_BIN = ROOT / "bin" / "nongjang-stt"
 JEV_PRICE_PER_MTOK = 0.042            # ดอลลาร์ต่อ input token 1 ล้าน (docs.typesafe.ai)
@@ -2566,6 +2569,7 @@ class STT:
     def __init__(self):
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")   # ไม่ต้องโชว์แถบโหลดทุกประโยค
         self.apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
+        self.typhoon = STT_ENGINE == "typhoon"
         self.apple = None
         if STT_ENGINE in ("auto", "apple") and apple_stt_available():
             try:
@@ -2586,7 +2590,32 @@ class STT:
         """Whisper: เป็นตัวหลักเมื่อไม่มีของ Apple หรือเป็นตัวสำรองเมื่อ Apple ล้ม (โหลดตอนจำเป็นเท่านั้น)"""
         if self._whisper_ready:
             return
-        if self.apple_silicon:
+        if self.typhoon:
+            import warnings
+            import torch
+            from transformers import pipeline
+            from transformers.utils import logging as hf_logging
+
+            # ปิดคำเตือน deprecation/logits processor ของ transformers ที่ไม่มีผลต่อการทำงาน
+            hf_logging.set_verbosity_error()
+            warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+            warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+
+            if torch.cuda.is_available():
+                device, dtype = "cuda:0", torch.float16
+            elif self.apple_silicon and torch.backends.mps.is_available():
+                device, dtype = "mps", torch.float32
+            else:
+                device, dtype = "cpu", torch.float32
+            self._typhoon_pipeline = pipeline(
+                "automatic-speech-recognition",
+                model=TYPHOON_WHISPER_REPO,
+                dtype=dtype,
+                device=device,
+                model_kwargs={"low_cpu_mem_usage": True, "use_safetensors": True},
+            )
+            self.whisper_name = f"transformers · {TYPHOON_WHISPER_REPO} ({device})"
+        elif self.apple_silicon:
             import mlx_whisper
             self._mlx = mlx_whisper
             self.whisper_name = f"mlx-whisper · {MLX_WHISPER_REPO}"
@@ -2609,7 +2638,7 @@ class STT:
 
     def _second_repo(self) -> str:
         """รุ่นสำหรับความเห็นที่สอง (เฉพาะ Apple Silicon และต้องอยู่ในเครื่องแล้วถ้าเป็น auto)"""
-        if not self.apple_silicon or STT_SECOND.lower() in ("off", "0", "no", ""):
+        if self.typhoon or not self.apple_silicon or STT_SECOND.lower() in ("off", "0", "no", ""):
             return ""
         repo = TYPHOON_REPO if STT_SECOND.lower() == "auto" else STT_SECOND
         if repo == MLX_WHISPER_REPO:
@@ -2621,7 +2650,7 @@ class STT:
         return repo
 
     def warmup(self) -> None:
-        """โหลดโมเดลล่วงหน้า (Whisper ครั้งแรกจะดาวน์โหลดจาก Hugging Face ~1.6 GB; ของ Apple อุ่นเครื่องตอนเปิดแล้ว)"""
+        """โหลดโมเดลล่วงหน้าจาก Hugging Face เมื่อจำเป็น; ของ Apple อุ่นเครื่องตอนเปิดแล้ว"""
         if self.apple is None:
             self.transcribe(np.zeros(RATE, dtype=np.float32))
         if self.second:
@@ -2655,6 +2684,12 @@ class STT:
         audio = self.normalize(audio)
         # จำกัดจำนวน token ตามความยาวเสียง: พูด 2 วิ จะถอดยาวเป็นย่อหน้าไม่ได้ (ตัดอาการวน)
         max_tokens = min(224, int(15 * len(audio) / RATE) + 24)
+        if self.typhoon:
+            result = self._typhoon_pipeline(
+                {"raw": audio, "sampling_rate": RATE},
+                generate_kwargs={"language": "thai", "task": "transcribe", "max_new_tokens": max_tokens},
+            )
+            return result["text"].strip()
         if self.apple_silicon:
             result = self._mlx.transcribe(audio, path_or_hf_repo=repo or MLX_WHISPER_REPO, language="th",
                                           initial_prompt=prompt, condition_on_previous_text=False,
@@ -2810,8 +2845,8 @@ def run_mic(dry_run: bool) -> None:
 │ STT      : {stt.name}{f" · ความเห็นที่สอง {stt.second}" if stt.second else ""}
 │ Jev      : {jev_label} · CONF_MIN {CONF_MIN:.2f} (คำสั่งเสี่ยง {CONF_RISKY:.2f})
 │ LLM      : {llm_label}
-│ เสียง     : {TTS_VOICE} @ {TTS_RATE}{f" ทุ้ม {TTS_PITCH}" if TTS_PITCH else ""} · {duplex}
-│ คำปลุก    : {wake}{'  · DRY-RUN' if dry_run else ''}
+│ Voice    : {TTS_VOICE} @ {TTS_RATE}{f" ทุ้ม {TTS_PITCH}" if TTS_PITCH else ""} · {duplex}
+│ Wake     : {wake}{'  · DRY-RUN' if dry_run else ''}
 ╰─ พูดได้เลย เช่น "จางวิท เปิดสปอติฟาย" (Ctrl+C เพื่อออก)""")
     speaker.say(pick("ready"))
     threading.Thread(target=warm_tts, daemon=True).start()   # เตรียมเสียงประโยคสำเร็จรูป (ตอบได้ทันที)
