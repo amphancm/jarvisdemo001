@@ -2232,9 +2232,28 @@ def is_echo(text: str, recent) -> bool:
 # 9) แปลงเสียงเป็นข้อความ (faster-whisper ในเครื่องบน Ubuntu 26.04)
 # ════════════════════════════════════════════════════════════════════════════
 
+def _preload_cuda_libs() -> None:
+    """โหลด cuBLAS/cuDNN จากแพ็กเกจ pip (nvidia-cublas-cu12, nvidia-cudnn-cu12) ให้ CTranslate2 ใช้ GPU ได้
+    โดยไม่ต้องตั้ง LD_LIBRARY_PATH เอง"""
+    import ctypes
+    import glob
+    import site
+    roots = list(site.getsitepackages()) + [site.getusersitepackages()]
+    # โหลด cuBLAS ก่อน แล้วค่อย cuDNN (cuDNN ต้องพึ่ง cuBLAS)
+    for pattern in ("nvidia/cublas/lib/libcublasLt.so.*", "nvidia/cublas/lib/libcublas.so.*",
+                    "nvidia/cudnn/lib/libcudnn*.so.*"):
+        for root in roots:
+            for lib in sorted(glob.glob(os.path.join(root, pattern))):
+                try:
+                    ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    pass
+
+
 class STT:
     def __init__(self):
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        _preload_cuda_libs()
         device, compute = "cpu", "int8"
         try:
             import ctranslate2
@@ -2557,8 +2576,8 @@ def run_mic(dry_run: bool) -> None:
 │ STT      : {stt.name}
 │ Jev      : {jev_label} · CONF_MIN {CONF_MIN:.2f} (คำสั่งเสี่ยง {CONF_RISKY:.2f})
 │ LLM      : {llm_label}
-│ เสียง     : {TTS_VOICE} @ {TTS_RATE} · {duplex}
-│ คำปลุก    : {wake}{'  · DRY-RUN' if dry_run else ''}
+│ Voice    : {TTS_VOICE} @ {TTS_RATE} · {duplex}
+│ Wake     : {wake}{'  · DRY-RUN' if dry_run else ''}
 ╰─ พูดได้เลย เช่น "จางวิท เปิดสปอติฟาย" (Ctrl+C เพื่อออก)""")
     speaker.say(pick("ready"))
     threading.Thread(target=warm_tts, daemon=True).start()
