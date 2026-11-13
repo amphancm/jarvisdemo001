@@ -13,7 +13,11 @@ import re
 import shutil
 import sys
 import unittest
+import io
+import wave
+import builtins
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -91,6 +95,143 @@ class TestThaiLanguageAndParsing(unittest.TestCase):
         t = jarvis.thai_time()
         self.assertTrue(t.startswith("ตอนนี้"))
         self.assertIn("นาที", t)
+
+
+class TestTyphoonSTT(unittest.TestCase):
+    """ทดสอบการส่ง WAV ไปยัง Typhoon โดยไม่เรียก API จริง"""
+
+    def test_initialization_requires_api_key(self):
+        with patch.object(jarvis, "TYPHOON_API_KEY", ""):
+            with self.assertRaisesRegex(RuntimeError, "TYPHOON_API_KEY"):
+                jarvis.STT()
+
+    def test_transcribe_posts_mono_16khz_wav(self):
+        stt = jarvis.STT.__new__(jarvis.STT)
+        stt.api_key = "test-api-key"
+        stt.model = "typhoon-asr-realtime"
+        response = Mock()
+        response.json.return_value = {"text": "จางวิท เปิด Spotify"}
+
+        with patch("jarvis.requests.post", return_value=response) as post:
+            text = stt.transcribe(jarvis.np.zeros(jarvis.RATE, dtype=jarvis.np.float32))
+
+        self.assertEqual(text, "จางวิท เปิด Spotify")
+        response.raise_for_status.assert_called_once_with()
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], "https://api.opentyphoon.ai/v1/audio/transcriptions")
+        self.assertEqual(kwargs["headers"], {"Authorization": "Bearer test-api-key"})
+        self.assertEqual(kwargs["data"], {"model": "typhoon-asr-realtime"})
+        filename, content, content_type = kwargs["files"]["file"]
+        self.assertEqual((filename, content_type), ("utterance.wav", "audio/wav"))
+        with wave.open(io.BytesIO(content), "rb") as wav_file:
+            self.assertEqual((wav_file.getnchannels(), wav_file.getsampwidth(), wav_file.getframerate()),
+                             (1, 2, jarvis.RATE))
+
+    def test_transcribe_propagates_api_errors(self):
+        stt = jarvis.STT.__new__(jarvis.STT)
+        stt.api_key = "test-api-key"
+        stt.model = "typhoon-asr-realtime"
+        response = Mock()
+        response.raise_for_status.side_effect = jarvis.requests.HTTPError("API unavailable")
+
+        with patch("jarvis.requests.post", return_value=response):
+            with self.assertRaises(jarvis.requests.HTTPError):
+                stt.transcribe(jarvis.np.zeros(jarvis.RATE, dtype=jarvis.np.float32))
+
+
+class TestMicrophoneDevice(unittest.TestCase):
+    def test_missing_portaudio_reports_system_dependency_before_initialization(self):
+        original_import = builtins.__import__
+
+        def import_without_portaudio(name, *args, **kwargs):
+            if name == "sounddevice":
+                raise OSError("PortAudio library not found")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_portaudio), \
+                patch.object(jarvis, "Jev") as jev:
+            with self.assertRaisesRegex(SystemExit, "sudo apt install -y libportaudio2"):
+                jarvis.run_mic(False)
+            jev.assert_not_called()
+
+    def test_unrelated_sounddevice_oserror_is_not_masked(self):
+        original_import = builtins.__import__
+
+        def import_with_error(name, *args, **kwargs):
+            if name == "sounddevice":
+                raise OSError("different error")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_with_error):
+            with self.assertRaisesRegex(OSError, "different error"):
+                jarvis.run_mic(False)
+
+    def test_microphone_device_selection(self):
+        for configured, expected in (("", None), ("1", 1), ("USB Device", "USB Device")):
+            with self.subTest(configured=configured), \
+                    patch.object(jarvis, "MIC_DEVICE", configured), \
+                    patch("sounddevice.InputStream") as stream, \
+                    patch("pysilero_vad.SileroVoiceActivityDetector"):
+                jarvis.Ears(Mock())
+                self.assertEqual(stream.call_args.kwargs["device"], expected)
+                self.assertNotIn("callback", stream.call_args.kwargs)
+
+
+class TestSpeakerOutput(unittest.TestCase):
+    def test_stream_uses_int16_and_preserves_output_samples(self):
+        sounddevice = Mock()
+        with patch.dict(sys.modules, {"sounddevice": sounddevice}), \
+                patch("jarvis.threading.Thread") as thread:
+            speaker = jarvis.Speaker()
+            thread.return_value.start.assert_called_once()
+
+        self.assertEqual(sounddevice.OutputStream.call_args.kwargs["dtype"], "int16")
+        speaker._chunks.append(jarvis.np.array([0, 16384, -32768], dtype=jarvis.np.int16))
+        outdata = jarvis.np.zeros((3, 1), dtype=jarvis.np.int16)
+        timing = type("Timing", (), {"outputBufferDacTime": 0.1, "currentTime": 0.0})()
+        speaker._on_output(outdata, 3, timing, None)
+        jarvis.np.testing.assert_array_equal(outdata[:, 0], [0, 16384, -32768])
+        speaker.close()
+
+    def test_say_speaker_passes_int16_audio(self):
+        audio = jarvis.np.array([0, 32767], dtype=jarvis.np.int16)
+        class ImmediateThread:
+            def __init__(self, target, daemon):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        sounddevice = Mock()
+        with patch.dict(sys.modules, {"sounddevice": sounddevice}), \
+                patch.object(jarvis, "speech_audio", return_value=audio), \
+                patch("jarvis.threading.Thread", ImmediateThread):
+            speaker = jarvis.SaySpeaker()
+            speaker.say("ทดสอบ")
+
+        played = sounddevice.play.call_args.args[0]
+        self.assertEqual(played.dtype, jarvis.np.int16)
+        jarvis.np.testing.assert_array_equal(played, audio)
+
+
+class TestHudRenderer(unittest.TestCase):
+    def test_raspberry_pi_disables_webkit_hardware_acceleration(self):
+        webview = Mock()
+        webkit = Mock()
+        with patch.object(Path, "read_bytes", return_value=b"Raspberry Pi 5 Model B Rev 1.0\0"):
+            jarvis._configure_hud_renderer(webview, webkit)
+        webview.get_settings().set_hardware_acceleration_policy.assert_called_once_with(
+            webkit.HardwareAccelerationPolicy.NEVER
+        )
+
+    def test_other_machines_keep_webkit_default(self):
+        for result in (b"Other computer\0", FileNotFoundError()):
+            with self.subTest(result=result):
+                webview = Mock()
+                with patch.object(Path, "read_bytes", side_effect=result if isinstance(result, Exception) else None,
+                                  return_value=result):
+                    jarvis._configure_hud_renderer(webview, Mock())
+                webview.get_settings.assert_not_called()
 
 
 class TestUbuntuControls(unittest.TestCase):

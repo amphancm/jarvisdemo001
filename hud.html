@@ -31,7 +31,7 @@ const S = 720, C = S / 2;                        // วาดที่ 2x ให
 const COLORS = { listen: "#36e3ff", speak: "#8fc8ff", think: "#ffb13b", web: "#4dffa6", control: "#c77dff", off: "#6f8190" };
 const LABELS = { listen: "LISTENING", speak: "SPEAKING", think: "THINKING", web: "BROWSING", control: "CONTROLLING", off: "OFFLINE" };
 let st = { state: "listen", level: 0, heard: "", reply: "", pinned: true };
-let level = 0, t0 = performance.now(), bars = new Float32Array(72);
+let level = 0, t0 = performance.now(), lastFrame = t0, spinTime = 0, bars = new Float32Array(72);
 
 window.hud = {
   update(s) {
@@ -59,9 +59,11 @@ function frame(now) {
 
   g.save(); g.globalCompositeOperation = "lighter"; g.shadowColor = col; g.shadowBlur = 18; g.lineCap = "butt";
   const spin = off ? 0.15 : 1 + level * 2;
+  spinTime += Math.max(0, now - lastFrame) / 1000 * spin;
+  lastFrame = now;
 
   // 1) วงนอก: ขีดสเกล 120 ขีด หมุนช้าๆ
-  g.save(); g.translate(C, C); g.rotate(t * 0.08 * spin);
+  g.save(); g.translate(C, C); g.rotate(spinTime * 0.08);
   for (let i = 0; i < 120; i++) {
     const long = i % 10 === 0, r1 = 318, r2 = long ? 298 : 308;
     g.rotate(Math.PI * 2 / 120); g.beginPath(); g.moveTo(r1, 0); g.lineTo(r2, 0);
@@ -71,12 +73,12 @@ function frame(now) {
   arc(328, 0, Math.PI * 2, 1.5, col, .35);
 
   // 2) วงส่วนโค้งหนา หมุนสวนทาง
-  const r2 = 276, a = -t * 0.35 * spin;
+  const r2 = 276, a = -spinTime * 0.35;
   [[0, 1.1], [1.5, 2.2], [2.6, 3.9], [4.3, 5.0], [5.3, 6.0]].forEach(([s, e], i) =>
     arc(r2, a + s, a + e, i % 2 ? 7 : 12, col, .75));
 
   // 3) วงเส้นประบาง หมุนเร็ว
-  g.setLineDash([4, 10]); arc(250, t * 0.9 * spin, t * 0.9 * spin + Math.PI * 2, 2, col, .6); g.setLineDash([]);
+  g.setLineDash([4, 10]); arc(250, spinTime * 0.9, spinTime * 0.9 + Math.PI * 2, 2, col, .6); g.setLineDash([]);
 
   // 4) กวาดเรดาร์ตอนคิด/ท่องเว็บ
   if (st.state === "think" || st.state === "web" || st.state === "control") {

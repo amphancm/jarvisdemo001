@@ -2,9 +2,9 @@
   <img src="docs/images/banner.png" alt="จางวิท — J.A.R.V.I.S ภาษาไทยบน Ubuntu Linux" width="100%">
 </p>
 
-# จางวิท — ผู้ช่วยเสียงภาษาไทยบน Ubuntu 26.04 LTS
+# จางวิท — ผู้ช่วยเสียงภาษาไทยบน Raspberry Pi OS 64-bit และ Ubuntu
 
-จางวิทคือผู้ช่วยแบบ **J.A.R.V.I.S** ในหนัง ที่ฟังภาษาไทยรู้เรื่องบนระบบ **Ubuntu 26.04 LTS** (GNOME Wayland / X11)
+จางวิทคือผู้ช่วยแบบ **J.A.R.V.I.S** ในหนัง ที่ฟังภาษาไทยรู้เรื่องบน **Raspberry Pi OS 64-bit Desktop (X11)** และ Ubuntu Linux
 แค่เรียก **"จางวิท"** แล้วพูดสิ่งที่อยากให้ทำ — ไม่ต้องกดปุ่ม ไม่ต้องพิมพ์ และคุยต่อได้เหมือนคุยกับเพื่อน
 
 ## ลองพูดแบบนี้
@@ -30,7 +30,7 @@
 <p align="center"><img src="docs/images/flow.png" alt="ขั้นตอนการทำงานของจางวิท" width="100%"></p>
 
 1. **ฟัง** — ไมค์ฟังตลอดเวลาด้วย WebRTC AEC และ Silero VAD ตัดเสียงของจางวิทเองออก (จึงพูดแทรกได้)
-2. **ถอดเสียงเป็นข้อความ** — ใช้ Faster-Whisper บน GPU (CUDA) หรือ CPU ในเครื่อง แม่นยำและไม่ส่งเสียงออกนอกเครื่อง
+2. **ถอดเสียงเป็นข้อความ** — ส่งเสียงแต่ละประโยคไปถอดเสียงด้วย Typhoon ASR API (`typhoon-asr-realtime`) จึงไม่ต้องโหลดโมเดล Whisper ขนาดใหญ่บน Raspberry Pi
 3. **ตัดสินใจด้วย Jev** — Jev คือ AI ตัดสินใจของ [TypeSafe](https://typesafe.ai) ที่ **เลือกคำตอบจากตัวเลือก**
    (เช่น "เป็นคำสั่งไหม" "เปิดแอปไหน" "คุยเล่นแบบไหน") ถามทุกอย่างในครั้งเดียว ใช้เวลา ~0.4 วินาที
    และบอกด้วยว่ามั่นใจแค่ไหน — **ถ้าไม่มั่นใจ จางวิทจะถามใหม่ ไม่เดาสุ่ม**
@@ -44,23 +44,27 @@
 ลอยอยู่บนหน้าจอ Ubuntu ขยับตามเสียง และเปลี่ยนสีตามสิ่งที่จางวิทกำลังทำ
 **ลากย้ายได้ · ดับเบิลคลิก = หยุด/เริ่มฟัง · คลิกขวา = เมนู** และมีไอคอนบน System Tray (AppIndicator) ให้เปิด/ปิดการฟัง
 
-## สิ่งที่ต้องมีบน Ubuntu 26.04
+บน Raspberry Pi HUD ใช้ software rendering ของ WebKit เพื่อหลีกเลี่ยงภาพผิดเพี้ยนจาก GPU ซึ่งอาจทำให้แอนิเมชันช้าลง
 
-- **Ubuntu 26.04 LTS** (หรือ Linux x86_64 ที่ใช้ GNOME Wayland / X11)
-- **Python 3.10 ขึ้นไป** (มาพร้อมกับระบบ)
+## สิ่งที่ต้องมี
+
+- **Raspberry Pi OS 64-bit Desktop (X11)** หรือ Ubuntu Linux
+- **Python 3.10 ขึ้นไป**
 - **คีย์ของ TypeSafe** (สำหรับ Jev) สมัครที่ [typesafe.ai](https://typesafe.ai)
+- **คีย์ Typhoon API** สำหรับถอดเสียง สมัครและดูรายละเอียดที่ [Typhoon ASR docs](https://docs.opentyphoon.ai/en/asr/)
 - **คีย์ของ Google Gemini หรือ OpenRouter** (หรือใช้ Ollama รันโมเดลในเครื่อง)
-- **Google Chrome** (สำหรับเอเจนต์ค้นเว็บ)
-- แพ็กเกจระบบเสริม: `tesseract-ocr`, `tesseract-ocr-tha`, `xdotool`, `wireplumber`
+- **Chromium หรือ Google Chrome** (สำหรับเอเจนต์ค้นเว็บ)
+- แพ็กเกจระบบ: `python3-gi`, `gir1.2-gtk-3.0`, `tesseract-ocr`, `tesseract-ocr-tha`, `xdotool`, `wireplumber`
 
-## การติดตั้งบน Ubuntu 26.04 (ทำครั้งเดียว)
+## การติดตั้งบน Raspberry Pi OS 64-bit (ทำครั้งเดียว)
 
 **1. ติดตั้งแพ็กเกจระบบที่จำเป็น**
 
 ```bash
 sudo apt update
-sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1 gir1.2-atspi-2.0 \
-    tesseract-ocr tesseract-ocr-tha xdotool wireplumber libportaudio2 ffmpeg
+sudo apt install -y python3-pip python3-venv python3-dev build-essential \
+    python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1 gir1.2-atspi-2.0 \
+    tesseract-ocr tesseract-ocr-tha xdotool libxtst6 wireplumber libportaudio2 ffmpeg
 ```
 
 **2. Clone repository และเตรียม Environment**
@@ -72,23 +76,55 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-**3. ใส่คีย์ในไฟล์ `.env`**
+**3. ตั้งค่าคีย์ในไฟล์ `.env`**
 
 ```bash
 cp .env.example .env
 ```
 เปิด `.env` แล้วใส่คีย์:
 - `TYPESAFE_API_KEY=...`
+- `TYPHOON_API_KEY=...`
 - `GOOGLE_API_KEY=...` หรือ `OPENROUTER_API_KEY=...` (เมื่อต้องการใช้โมเดลคลาวด์)
 
-## เริ่มใช้งานบน Ubuntu 26.04
+## เริ่มใช้งาน
 
 ```bash
 ./run_app.sh
 ```
 
+หากยังไม่มี `.venv` หรือแพ็กเกจ Python ยังไม่ครบ สคริปต์จะสร้าง virtual environment และติดตั้งแพ็กเกจจาก `requirements.txt` ใน `.venv` โดยไม่ติดตั้งลง Python ของระบบ
+
 จางวิทจะเปิดทำงานพร้อมหน้าจอ J.A.R.V.I.S HUD
 ปิดได้ด้วย **Ctrl+C** ในเทอร์มินัล หรือเมนู **ออก** ที่ไอคอน System Tray
+
+### แก้ปัญหาเปิดไมค์ไม่สำเร็จ
+
+หากพบ `PortAudio library not found` ให้ติดตั้งไลบรารีระบบ (การติดตั้ง `sounddevice` ด้วย pip อย่างเดียวไม่เพียงพอ) แล้วรันใหม่:
+
+```bash
+sudo apt update
+sudo apt install -y libportaudio2
+./run_app.sh
+```
+
+หากพบ `Error starting stream: Wait timed out` ให้ตรวจสอบไมค์และดูรายการอุปกรณ์:
+
+```bash
+.venv/bin/python -m sounddevice
+arecord -l
+```
+
+ลองระบุหมายเลขหรือส่วนหนึ่งของชื่ออุปกรณ์ **input** จากรายการ sounddevice ใน `.env` เช่น `MIC_DEVICE=1` แล้วรันใหม่ หมายเลขอาจเปลี่ยนเมื่อเสียบอุปกรณ์ใหม่; เว้นว่างเพื่อใช้ค่าเริ่มต้น ตัวรับเสียงใช้ blocking-read mode เพื่อเลี่ยง callback thread timeout บน ALSA การเลือกอุปกรณ์ ALSA โดยตรงอาจใช้ไม่ได้หากแอปอื่นหรือ PipeWire กำลังใช้ไมค์อยู่ และไมค์ต้องรองรับ 16 kHz mono
+
+หากใช้ไมค์ในเว็บแคม USB แล้วไม่ตอบสนองต่อเสียงพูด สาเหตุที่พบบ่อยคือเกนไมค์ฮาร์ดแวร์สูงสุดจนเสียงพูดแตก (clipping) แอปจะลดเกนลงเป็น 40% ให้อัตโนมัติตอนเริ่ม ปรับได้ด้วย `MIC_GAIN` ใน `.env` (เช่น `MIC_GAIN=30`; `off` = ไม่ปรับ)
+
+หากใช้หูฟัง Bluetooth ที่เสียงออกได้แต่ไมค์ไม่ทำงาน ให้เปลี่ยนโปรไฟล์จาก **High Fidelity Playback (A2DP)** เป็น **Headset Head Unit (HSP/HFP)** ใน Settings > Sound หรือใช้ `pactl list cards` เพื่อดูชื่อการ์ด แล้วสั่ง `pactl set-card-profile <ชื่อการ์ด> headset-head-unit` จากนั้นเลือกไมค์หูฟังเป็น Input ใน Settings > Sound (หรือ `pactl set-default-source <ชื่อแหล่งเสียงไมค์>`). โปรไฟล์ HSP/HFP เปิดไมค์ได้แต่คุณภาพเสียงขาออกจะลดลง; A2DP ให้เสียงสเตอริโอคุณภาพสูงแต่ไม่มีไมค์
+
+หากยังไม่ได้ ให้ตรวจสอบไมค์และแอปที่ใช้เสียงอยู่ รวมถึงสถานะ `systemctl --user status pipewire pipewire-pulse wireplumber` ก่อนลองใหม่
+
+### แก้ปัญหาเล่นเสียงพูดไม่สำเร็จ
+
+หากพบ `Sample format not supported` ในข้อความ ALSA ให้ลองรันแอปเวอร์ชันล่าสุด ซึ่งส่งเสียงออกเป็น PCM `int16` ที่ ALSA รองรับได้กว้างกว่า หากยังมีปัญหา ให้ตรวจสอบว่าเลือกอุปกรณ์เสียงออกถูกต้องใน Settings > Sound และตรวจรายการอุปกรณ์ด้วย `wpctl status`
 
 ### ทดสอบระบบ (Selftest)
 
@@ -116,7 +152,7 @@ cp .env.example .env
 
 ## ความปลอดภัยและความเป็นส่วนตัว
 
-- **เสียงของคุณไม่ถูกส่งออกจากเครื่อง** — ถอดเสียงในเครื่องด้วย Faster-Whisper ส่งเฉพาะข้อความสั้นๆ ให้ Jev
+- **การถอดเสียงใช้คลาวด์** — ส่งเสียงแต่ละประโยคไปยัง Typhoon ASR API; อย่าใช้กับเสียงที่ไม่ต้องการส่งออกนอกเครื่อง
 - **AI ในเครื่อง** — รองรับ Ollama (เช่น typhoon2, qwen2.5) ตอบคำถามโดยไม่ต้องต่อเน็ต
 - **Chrome แยกโปรไฟล์** — เอเจนต์ท่องเว็บใช้โฟลเดอร์แยก (`.browser-profile`) ไม่แตะต้องรหัสผ่านหรือคุกกี้ส่วนตัวของคุณ
 - **ไม่ทำเรื่องเสี่ยงแทนคุณ**: ไม่กดปุ่มลบ / สั่งซื้อ / จ่ายเงิน / Format / ลบไฟล์สำคัญ และไม่กรอกรหัสผ่านแทนคุณ
@@ -125,7 +161,7 @@ cp .env.example .env
 
 | ไฟล์ | หน้าที่ |
 |---|---|
-| `jarvis.py` | แกนหลัก: ฟังเสียง, Faster-Whisper, ตัดสินใจด้วย Jev, ควบคุมระบบ และสังเคราะห์เสียงพูด |
+| `jarvis.py` | แกนหลัก: ฟังเสียง, Typhoon ASR API, ตัดสินใจด้วย Jev, ควบคุมระบบ และสังเคราะห์เสียงพูด |
 | `computer_agent.py` | จับภาพหน้าจอ (GNOME D-Bus), OCR, AT-SPI2 Accessibility, คุมเมาส์และคีย์บอร์ด |
 | `browser_agent.py` | ท่องเว็บด้วย Playwright บน Google Chrome |
 | `hud.html` | ส่วนต่อประสาน GUI แบบโปร่งใส (GTK3 + WebKit2) |

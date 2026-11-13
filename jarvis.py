@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Jarvis ไทย (Ubuntu 26.04) — "จางวิท" ผู้ช่วยสั่งงานคอมพิวเตอร์ด้วยเสียงภาษาไทย แบบ full duplex
+Jarvis ไทย (Raspberry Pi OS 64-bit / Ubuntu) — "จางวิท" ผู้ช่วยสั่งงานคอมพิวเตอร์ด้วยเสียงภาษาไทย แบบ full duplex
 (ฟังตลอดเวลา ไม่ต้องกดปุ่ม เรียก "จางวิท" แล้วสั่งได้เลย พูดแทรกตอนจางวิทกำลังพูดได้)
 
 ท่อการทำงาน
-  ไมค์ ─► ตัดเสียงสะท้อน (AEC) ─► VAD ตัดประโยค ─► faster-whisper ในเครื่อง (ภาษาไทย) ─► ได้ยิน "จางวิท" ไหม
+  ไมค์ ─► ตัดเสียงสะท้อน (AEC) ─► VAD ตัดประโยค ─► Typhoon ASR API (ภาษาไทย) ─► ได้ยิน "จางวิท" ไหม
        ─► Jev ตัดสินใจ (typesafe-sdk หรือ LLM fallback, speculative fan-out)
        ─► สั่งเครื่อง Ubuntu | ท่องเว็บด้วย Playwright (browser_agent.py) | คุมจอ (computer_agent.py) | ถาม LLM
        ─► พูดตอบด้วยเสียงไทย (edge-tts เล่นผ่านลำโพงเอง จึงหยุดได้ทันทีเมื่อถูกพูดแทรก)
@@ -24,6 +24,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -264,8 +265,8 @@ CHAT_CONF = 0.7                       # Jev มั่นใจเท่านี
 MOOD_INTENTS = {"tired", "hungry", "bored", "sad"}
 ASKS_RE = re.compile(r"อะไร|ยังไง|อย่างไร|ทำไม|ไหม|มั้ย|หรือเปล่า|กี่|ที่ไหน|เท่าไ|ช่วย|แนะนำ|ดี\s*$")
 
-# คำใบ้ให้ Whisper: ประโยคไทยปนชื่อแอปอังกฤษ ช่วยให้สะกดชื่อแอปและคำปลุกถูก
-WHISPER_PROMPT = "จางวิท เปิด Spotify ปิด LINE เปิด Slack เปิด Google Chrome เปิด VS Code เพิ่มเสียง ลดเสียง หยุดเพลง หาห้องพัก กี่โมงแล้ว"
+# ตัวอย่างคำที่ใช้ตัด transcript ที่โมเดลถอดซ้ำ/หลอนทั้งประโยค
+STT_REFERENCE_PHRASE = "จางวิท เปิด Spotify ปิด LINE เปิด Slack เปิด Google Chrome เปิด VS Code เพิ่มเสียง ลดเสียง หยุดเพลง หาห้องพัก กี่โมงแล้ว"
 
 # รูปที่ Whisper มักถอดคำว่า "จางวิท" ออกมา: จางวิท จาง วิท จางวิทย์ จางวิช จางวิด จางวิส จาร์วิส จาวิส อาจารย์วิท
 JANG_WIT_RE = r"(?:(?:น้อง|อาจารย์|จารย์)?[\s,]*(?:จ|ช|ท|ก)[่้๊๋]?[ัา]ร?์?[งนรย]?[\s,]*ว[ิี][่้๊๋]?(?:ท|ต|ด|ช|ธ|ซ|ส|ญ|ทย์|ทธิ์|ชญ์|ตร์|ร์)|jarvis|jangwit)"
@@ -296,6 +297,8 @@ def env_float(name: str, default: float) -> float:
 
 
 TYPESAFE_API_KEY = env_str("TYPESAFE_API_KEY")
+TYPHOON_API_KEY = env_str("TYPHOON_API_KEY")
+TYPHOON_ASR_MODEL = env_str("TYPHOON_ASR_MODEL", "typhoon-asr-realtime")
 OPENROUTER_API_KEY = env_str("OPENROUTER_API_KEY")
 TOGETHER_API_KEY = env_str("TOGETHER_API_KEY") or env_str("TOGETHERAI_API_KEY")
 GOOGLE_API_KEY = env_str("GOOGLE_API_KEY") or env_str("GEMINI_API_KEY")
@@ -421,6 +424,8 @@ WAKE_RE = re.compile("|".join(JANG_WIT_RE if w == "จางวิท" else re.e
     if WAKE_WORDS else None
 
 RATE = 16000                          # ทุกอย่างเป็น 16 kHz mono
+MIC_DEVICE = env_str("MIC_DEVICE")
+MIC_GAIN = env_str("MIC_GAIN", "40")   # % ของเกนไมค์ ALSA (เว็บแคม USB มักตั้งไว้สูงสุดจนเสียงแตก) · off = ไม่แตะ
 APP_ACTIONS = {"open_app", "quit_app"}
 RISKY_ACTIONS = {"quit_app", "lock_screen", "sleep"}
 CONF_RISKY = max(CONF_MIN, 0.8)
@@ -432,12 +437,8 @@ SPEAK_FIRST = {"volume_mute", "lock_screen", "sleep"}
 VOLUME_STEP = 10
 FOLLOWUP_SEC = env_float("CONVO_SEC", 30)
 BROWSER_PROFILE = ROOT / ".browser-profile"
-FASTER_WHISPER_MODEL = env_str("FASTER_WHISPER_MODEL", "large-v3-turbo")
-_prompt_mode = env_str("WHISPER_PROMPT_MODE", "auto").lower()
-USE_WHISPER_PROMPT = _prompt_mode in ("on", "auto") and "typhoon" not in FASTER_WHISPER_MODEL.lower()
 SAVE_UTTERANCES = env_str("SAVE_UTTERANCES")
 LOG_HEARD = env_str("LOG_HEARD", "").lower()
-STT_SECOND = env_str("STT_SECOND_OPINION", "off")
 JEV_PRICE_PER_MTOK = 0.042
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1428,17 +1429,16 @@ class Assistant:
         self.last_failed, self.last_failed_at = "", 0.0
         from concurrent.futures import ThreadPoolExecutor
         self._pool = ThreadPoolExecutor(max_workers=1)
-        self._stt_pool = ThreadPoolExecutor(max_workers=1)
         self._early = None
 
     @property
     def browsing(self) -> bool:
         return self.job != ""
 
-    def handle(self, text: str, second_opinion=None) -> None:
+    def handle(self, text: str) -> None:
         self.last_text, self.thinking = text, True
         try:
-            self._handle(text, second_opinion)
+            self._handle(text)
         finally:
             self.thinking = False
 
@@ -1452,7 +1452,7 @@ class Assistant:
         print(f"  ⇒ {describe(d)} · conf {d.conf:.2f} (เกณฑ์ {required_conf(d):.2f}) · Jev {d.calls} ครั้ง {d.ms:.0f} ms")
         return d
 
-    def _handle(self, text: str, second_opinion=None) -> None:
+    def _handle(self, text: str) -> None:
         if only_wake(text):
             self.speaker.say(pick("wake"))
             self.last_active = time.monotonic()
@@ -1471,23 +1471,10 @@ class Assistant:
             if self._early is not None:
                 self._early.cancel()
             early = self._early = self._pool.submit(self._think, text)
-        spec2 = self._stt_pool.submit(second_opinion) if woke and second_opinion is not None else None
         d = self._decide(text, context.strip())
         if d is None:
             return
         need = required_conf(d)
-        if woke and d.category != "noise" and d.conf < need and spec2 is not None:
-            try:
-                alt = strip_wake(spec2.result(timeout=15) or "")
-            except Exception as e:
-                print(f"  ⚠️  ถอดเสียงซ้ำไม่สำเร็จ: {e}")
-                alt = ""
-            if alt and normalize(alt) != normalize(text):
-                print(f"  🔁 ความเห็นที่สอง: {alt}")
-                d2 = self._decide(alt, context.strip())
-                if d2 is not None and d2.category != "noise" and d2.conf >= required_conf(d2):
-                    d, text, need = d2, alt, required_conf(d2)
-
         clear_command = d.category == "command" and d.conf >= need and any(s.action != "none" for s in d.steps)
         vague_command = d.category == "command" and any(s.action not in ("none", "web_task") for s in d.steps)
         chat_reply = chatting and d.category != "noise"
@@ -1723,6 +1710,9 @@ def synthesize(text: str) -> np.ndarray | None:
     """สังเคราะห์ข้อความเป็นเสียง int16 16 kHz mono ด้วย edge-tts และแปลงด้วย miniaudio"""
     if _SHUTTING_DOWN.is_set() or sys.is_finalizing() or not text.strip():
         return None
+    # ข้อความที่มีแต่เครื่องหมายวรรคตอน (เช่น "...", "—") edge-tts จะไม่ส่งเสียงกลับมา
+    if not any(ch.isalnum() for ch in text):
+        return None
     import asyncio
     try:
         import edge_tts
@@ -1827,6 +1817,31 @@ def warm_tts() -> None:
         print(f"  🗣️  เตรียมเสียงประโยคสำเร็จรูปไว้แล้ว {made} ประโยค")
 
 
+OUTPUT_DTYPES = ("int16", "float32", "int32")
+
+
+def to_output_dtype(pcm: np.ndarray, dtype: str) -> np.ndarray:
+    if dtype == "int16":
+        return pcm
+    if dtype == "int32":
+        return pcm.astype(np.int32) << 16
+    return pcm.astype(np.float32) / 32768
+
+
+def is_format_error(e: Exception) -> bool:
+    return "-9994" in str(e) or "format not supported" in str(e).lower()
+
+
+def sound_server_player() -> list[str] | None:
+    """เครื่องเล่นของ PipeWire/PulseAudio/ALSA สำหรับตอนที่ PortAudio เปิดลำโพงไม่ได้"""
+    for cmd in (["pw-play", "-a", "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"],
+                ["paplay", "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le"],
+                ["aplay", "-q", "-t", "raw", "-r", str(RATE), "-c", "1", "-f", "S16_LE"]):
+        if shutil.which(cmd[0]):
+            return cmd
+    return None
+
+
 class SaySpeaker:
     """พูดผ่าน sounddevice ตรงๆ หรือ print ในโหมด dry-run"""
     on_played = None
@@ -1844,6 +1859,19 @@ class SaySpeaker:
         self.enabled = enabled
         self.recent: deque = deque(maxlen=5)
         self._playing = False
+        self._proc: subprocess.Popen | None = None
+
+    def _play_external(self, audio: np.ndarray) -> bool:
+        cmd = sound_server_player()
+        if cmd is None:
+            return False
+        try:
+            self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._proc.communicate(audio.astype(np.int16).tobytes())
+            return self._proc.returncode == 0
+        except OSError:
+            return False
 
     def say(self, text: str) -> None:
         if not text:
@@ -1858,11 +1886,16 @@ class SaySpeaker:
             try:
                 audio = speech_audio(text)
                 if audio is not None:
-                    try:
-                        import sounddevice as sd
-                        sd.play(audio, samplerate=RATE, blocking=True)
-                    except Exception as e:
-                        print(f"  ⚠️  เล่นเสียงไม่สำเร็จ: {e}")
+                    import sounddevice as sd
+                    for dtype in OUTPUT_DTYPES:
+                        try:
+                            sd.play(to_output_dtype(audio, dtype), samplerate=RATE, blocking=True)
+                            break
+                        except Exception as e:
+                            if dtype == OUTPUT_DTYPES[-1] or not is_format_error(e):
+                                if not (is_format_error(e) and self._play_external(audio)):
+                                    print(f"  ⚠️  เล่นเสียงไม่สำเร็จ: {e}")
+                                break
             finally:
                 self._playing = False
         threading.Thread(target=_play, daemon=True).start()
@@ -1874,6 +1907,8 @@ class SaySpeaker:
                 sd.stop()
             except Exception:
                 pass
+            if self._proc and self._proc.poll() is None:
+                self._proc.terminate()
             self._playing = False
 
     @property
@@ -1910,8 +1945,16 @@ class Speaker:
         self._last_sound = 0.0
         self._reply_start = 0.0
         self.level = 0.0
-        self.stream = sd.OutputStream(samplerate=RATE, channels=1, dtype="int16",
-                                      blocksize=self.BLOCK, callback=self._on_output)
+        self.stream = None
+        for dtype in OUTPUT_DTYPES:
+            self._dtype = dtype
+            try:
+                self.stream = sd.OutputStream(samplerate=RATE, channels=1, dtype=dtype,
+                                              blocksize=self.BLOCK, callback=self._on_output)
+                break
+            except Exception as e:
+                if dtype == OUTPUT_DTYPES[-1] or not is_format_error(e):
+                    raise
         self.stream.start()
         threading.Thread(target=self._synth_loop, daemon=True).start()
 
@@ -2002,7 +2045,7 @@ class Speaker:
                 if now - self._last_sound > self.TAIL:
                     self._reply_start = now
                 self._last_sound = now
-        outdata[:, 0] = out
+        outdata[:, 0] = to_output_dtype(out, self._dtype)
         self.level = float(np.sqrt(np.mean(out.astype(np.float32) ** 2))) / 32768
         if self.on_played is not None:
             self.on_played(out)
@@ -2070,12 +2113,38 @@ def make_echo_canceller():
         return None, None
 
 
+def limit_mic_gain() -> None:
+    """USB mic (เช่น เว็บแคม) มักมีเกนสูงสุดจนเสียงพูดแตก VAD/ASR จับไม่ได้ — ลดเกนฮาร์ดแวร์ลง"""
+    if MIC_GAIN.lower() in ("off", "0", "no") or not MIC_GAIN.isdecimal() or not shutil.which("amixer"):
+        return
+    pct = min(100, int(MIC_GAIN))
+    try:
+        cards = [line.split()[0] for line in Path("/proc/asound/cards").read_text().splitlines()
+                 if line.split() and line.split()[0].isdecimal()]
+    except OSError:
+        return
+    for card in cards:
+        try:
+            out = subprocess.run(["amixer", "-c", card, "cget", "name=Mic Capture Volume"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            top = re.search(r"max=(\d+)", out)
+            if not top or int(top.group(1)) <= 0:
+                continue
+            subprocess.run(["amixer", "-c", card, "cset", "name=Mic Capture Volume",
+                            str(round(int(top.group(1)) * pct / 100))],
+                           capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+
 class Ears:
     BLOCK = 480
 
     def __init__(self, speaker):
         import sounddevice as sd
         from pysilero_vad import SileroVoiceActivityDetector
+        limit_mic_gain()
+        self.sd = sd
         self.speaker = speaker
         self.vad = SileroVoiceActivityDetector()
         self.seg = Segmenter()
@@ -2089,21 +2158,47 @@ class Ears:
         self.level = 0.0
         self._talk = 0
         self._overlap = self._interrupted = False
+        self._closed = False
+        self._capture_generation = 0
+        self._capture_active = threading.Event()
         speaker.on_played = self._reference
+        device = int(MIC_DEVICE) if MIC_DEVICE.isdecimal() else MIC_DEVICE or None
         self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16",
-                                     blocksize=self.BLOCK, callback=self._on_input)
+                                     blocksize=self.BLOCK, device=device)
 
     def start(self) -> None:
         self.stream.start()
+        self._capture_active.set()
+        threading.Thread(target=self._capture_loop, daemon=True).start()
         threading.Thread(target=self._loop, daemon=True).start()
+
+    def _capture_loop(self) -> None:
+        while not self._closed:
+            if not self._capture_active.wait(0.1):
+                continue
+            generation = self._capture_generation
+            try:
+                block, _ = self.stream.read(self.BLOCK)
+            except self.sd.PortAudioError as e:
+                if self._closed or generation != self._capture_generation or not self._capture_active.is_set():
+                    continue
+                self._capture_active.clear()
+                self.listening = False
+                print(f"\n⚠️  อ่านเสียงจากไมค์ไม่สำเร็จ ({e})")
+                return
+            self._on_input(block, self.BLOCK, None, None)
 
     def set_listening(self, on: bool) -> None:
         if on == self.listening:
             return
-        self.listening = on
         if on:
             self.stream.start()
+            self._capture_active.set()
+            self.listening = True
         else:
+            self.listening = False
+            self._capture_active.clear()
+            self._capture_generation += 1
             self.stream.stop()
             self.seg.reset()
             self.vad.reset()
@@ -2111,6 +2206,9 @@ class Ears:
         print(f"\n{'🎙  เปิดการฟังแล้ว' if on else '🔇 ปิดการฟังแล้ว'}")
 
     def close(self) -> None:
+        self._closed = True
+        self._capture_active.clear()
+        self._capture_generation += 1
         self.stream.stop()
         self.stream.close()
         self.speaker.on_played = None
@@ -2140,7 +2238,8 @@ class Ears:
                     self._aec_failed(e)
 
     def _on_input(self, indata, frames, time_info, status) -> None:
-        self._adc_lag = max(0.0, time_info.currentTime - time_info.inputBufferAdcTime)
+        if time_info is not None:
+            self._adc_lag = max(0.0, time_info.currentTime - time_info.inputBufferAdcTime)
         block = indata[:, 0].copy()
         with self._apm_lock:
             if self.apm is not None:
@@ -2219,7 +2318,7 @@ def is_garbage(text: str) -> bool:
         return True
     if len(t) < 40 and any(normalize(h) in t for h in HALLUCINATIONS):
         return True
-    prompt = normalize(WHISPER_PROMPT)
+    prompt = normalize(STT_REFERENCE_PHRASE)
     return len(t) >= len(prompt) // 2 and coverage(t, prompt) > 0.9
 
 
@@ -2229,63 +2328,19 @@ def is_echo(text: str, recent) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 9) แปลงเสียงเป็นข้อความ (faster-whisper ในเครื่องบน Ubuntu 26.04)
+# 9) แปลงเสียงเป็นข้อความ (Typhoon ASR API)
 # ════════════════════════════════════════════════════════════════════════════
-
-def _preload_cuda_libs() -> None:
-    """โหลด cuBLAS/cuDNN จากแพ็กเกจ pip (nvidia-cublas-cu12, nvidia-cudnn-cu12) ให้ CTranslate2 ใช้ GPU ได้
-    โดยไม่ต้องตั้ง LD_LIBRARY_PATH เอง"""
-    import ctypes
-    import glob
-    import site
-    roots = list(site.getsitepackages()) + [site.getusersitepackages()]
-    # โหลด cuBLAS ก่อน แล้วค่อย cuDNN (cuDNN ต้องพึ่ง cuBLAS)
-    for pattern in ("nvidia/cublas/lib/libcublasLt.so.*", "nvidia/cublas/lib/libcublas.so.*",
-                    "nvidia/cudnn/lib/libcudnn*.so.*"):
-        for root in roots:
-            for lib in sorted(glob.glob(os.path.join(root, pattern))):
-                try:
-                    ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
-                except OSError:
-                    pass
-
 
 class STT:
     def __init__(self):
-        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-        _preload_cuda_libs()
-        device, compute = "cpu", "int8"
-        try:
-            import ctranslate2
-            if ctranslate2.get_cuda_device_count() > 0:
-                device, compute = "cuda", "float16"
-        except Exception:
-            pass
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError:
-            sys.exit(
-                "\n❌ ไม่พบโมเดลถอดเสียง faster-whisper (หรือยังไม่ได้ติดตั้งแพ็กเกจ)\n"
-                "กรุณาติดตั้งแพ็กเกจด้วยคำสั่ง:\n"
-                "    .venv/bin/pip install -r requirements.txt\n\n"
-                "หากยังไม่มี pip หรือ .venv บน Ubuntu ให้รัน:\n"
-                "    sudo apt update && sudo apt install -y python3-pip python3-venv libportaudio2 ffmpeg\n"
-                "    rm -rf .venv && python3 -m venv --system-site-packages .venv\n"
-                "    .venv/bin/pip install -r requirements.txt\n"
+        if not TYPHOON_API_KEY:
+            raise RuntimeError(
+                "ตั้งค่า TYPHOON_API_KEY ในไฟล์ .env ก่อนใช้งานไมโครโฟนหรือ --wav "
+                "(ดู https://docs.opentyphoon.ai/en/asr/)"
             )
-        self._model = WhisperModel(FASTER_WHISPER_MODEL, device=device, compute_type=compute)
-        self.whisper_name = f"faster-whisper · {FASTER_WHISPER_MODEL} {compute} {device.upper()}"
-        self.name = self.whisper_name
-        self.second = STT_SECOND if STT_SECOND.lower() not in ("off", "0", "no", "") else ""
-
-    def warmup(self) -> None:
-        self.transcribe(np.zeros(RATE, dtype=np.float32))
-
-    def transcribe_second(self, audio: np.ndarray) -> str:
-        if not self.second:
-            return ""
-        text = self._run(audio, None, model_name=self.second)
-        return "" if LOOP_RE.search(text) else collapse_repeats(text)
+        self.api_key = TYPHOON_API_KEY
+        self.model = TYPHOON_ASR_MODEL
+        self.name = f"Typhoon ASR API · {self.model}"
 
     @staticmethod
     def normalize(audio: np.ndarray) -> np.ndarray:
@@ -2298,19 +2353,27 @@ class STT:
             return audio
         return np.clip(audio * min(0.1 / speech, 20.0), -1, 1).astype(np.float32)
 
-    def _run(self, audio: np.ndarray, prompt: str | None, model_name: str = "") -> str:
-        audio = self.normalize(audio)
-        max_tokens = min(224, int(15 * len(audio) / RATE) + 24)
-        segs, _ = self._model.transcribe(audio, language="th", initial_prompt=prompt, beam_size=5,
-                                         temperature=0.0, condition_on_previous_text=False,
-                                         vad_filter=False, max_new_tokens=max_tokens)
-        segments = [(s.text, s.avg_logprob, s.compression_ratio) for s in segs]
-        return " ".join(t.strip() for t, logprob, ratio in segments if logprob >= -1.0 and ratio <= 2.4).strip()
-
     def transcribe(self, audio: np.ndarray) -> str:
-        text = self._run(audio, WHISPER_PROMPT if USE_WHISPER_PROMPT else None)
-        if USE_WHISPER_PROMPT and LOOP_RE.search(text):
-            text = self._run(audio, None)
+        pcm = (np.clip(self.normalize(audio), -1.0, 1.0) * 32767).astype("<i2")
+        wav_buffer = BytesIO()
+        with wave.open(wav_buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(RATE)
+            wav_file.writeframes(pcm.tobytes())
+
+        response = requests.post(
+            "https://api.opentyphoon.ai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            data={"model": self.model},
+            files={"file": ("utterance.wav", wav_buffer.getvalue(), "audio/wav")},
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            raise ValueError("Typhoon ASR API returned an invalid transcription response")
+        text = payload["text"]
         return "" if LOOP_RE.search(text) else collapse_repeats(text)
 
 
@@ -2400,6 +2463,19 @@ def shutdown(ears) -> None:
             pass
 
 
+def _configure_hud_renderer(webview, webkit) -> None:
+    try:
+        model = Path("/proc/device-tree/model").read_bytes()
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        print(f"⚠️  ตรวจสอบรุ่นเครื่องสำหรับ HUD ไม่ได้: {e}")
+        return
+    if model.startswith(b"Raspberry Pi"):
+        webview.get_settings().set_hardware_acceleration_policy(webkit.HardwareAccelerationPolicy.NEVER)
+        print("🎛  HUD ใช้ software rendering เพื่อป้องกันภาพผิดเพี้ยนบน Raspberry Pi")
+
+
 def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
     """หน้าจอ HUD (GTK3 + WebKit2) + ถาดระบบ (pystray) บน Ubuntu 26.04"""
     try:
@@ -2408,9 +2484,13 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
         gi.require_version("Gdk", "3.0")
         gi.require_version("WebKit2", "4.1")
         from gi.repository import Gtk, Gdk, GLib, WebKit2
-        if not Gtk.init_check()[0]:
-            return False
-    except Exception:
+    except Exception as e:
+        print(f"⚠️  เปิด HUD ไม่ได้ ({type(e).__name__}: {e})")
+        print("   ติดตั้ง GTK/WebKit2 แล้วลองใหม่: sudo apt install -y python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1")
+        return False
+    if not Gtk.init_check()[0]:
+        print("⚠️  เปิด HUD ไม่ได้: ไม่พบ graphical display (DISPLAY/WAYLAND_DISPLAY)")
+        print("   กรุณารันจางวิทจากเทอร์มินัลบนหน้า Desktop ไม่ใช่ SSH หรือโหมด headless")
         return False
 
     labels = {"off": "ปิดการฟังอยู่", "web": "กำลังท่องเว็บ…", "control": "กำลังคุมเครื่อง…", "speak": "กำลังพูด…",
@@ -2445,12 +2525,19 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
     if visual is not None:
         win.set_visual(visual)
 
-    sw, sh = screen.get_width(), screen.get_height()
-    x = int(saved.get("x", sw - 380 - 30))
-    y = int(saved.get("y", sh - 450 - 70))
+    display = Gdk.Display.get_default()
+    monitor = display.get_primary_monitor() if display is not None else None
+    if monitor is None and display is not None and display.get_n_monitors():
+        monitor = display.get_monitor(0)
+    if monitor is None:
+        raise RuntimeError("No display monitor is available for the HUD")
+    geometry = monitor.get_geometry()
+    x = int(saved.get("x", geometry.x + geometry.width - 380 - 30))
+    y = int(saved.get("y", geometry.y + geometry.height - 450 - 70))
     win.move(x, y)
 
     webview = WebKit2.WebView()
+    _configure_hud_renderer(webview, WebKit2)
     webview.set_background_color(Gdk.RGBA(0, 0, 0, 0))
     hud_page = (ROOT / "hud.html").resolve()
     webview.load_uri(hud_page.as_uri())
@@ -2472,7 +2559,7 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
                 data = {"state": st, "level": round(lvl, 4), "pinned": pinned[0],
                         "heard": assistant.last_text[-80:], "reply": recent[-1][1][:90] if recent else ""}
                 js = f"window.hud && hud.update({json.dumps(data)})"
-                webview.run_javascript(js, None, None, None)
+                webview.evaluate_javascript(js, -1, None, None, None, None)
             except Exception:
                 pass
         else:
@@ -2544,14 +2631,20 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
 
 
 def run_mic(dry_run: bool) -> None:
+    try:
+        import sounddevice
+    except OSError as e:
+        if str(e) != "PortAudio library not found":
+            raise
+        sys.exit("❌ ไม่พบ PortAudio สำหรับไมโครโฟน กรุณาติดตั้งแพ็กเกจระบบแล้วลองใหม่:\n"
+                 "    sudo apt update && sudo apt install -y libportaudio2")
     for sig_name in ("SIGTERM", "SIGHUP"):
         sig = getattr(signal, sig_name, None)
         if sig is not None:
             signal.signal(sig, signal.default_int_handler)
     Jev()
-    print("⏳ กำลังโหลดตัวถอดเสียง (faster-whisper) ...")
+    print("⏳ กำลังเตรียม Typhoon ASR API ...")
     stt = STT()
-    stt.warmup()
     try:
         speaker = Speaker()
     except Exception as e:
@@ -2598,14 +2691,14 @@ def run_mic(dry_run: bool) -> None:
                 if interrupted:
                     speaker.stop()
                 print(f"\n🗣️  {text}  ·  STT {ms:.0f} ms ({len(audio) / RATE:.1f} วิ)")
-                assistant.handle(text, (lambda a=audio: stt.transcribe_second(a)) if stt.second else None)
+                assistant.handle(text)
                 print(f"  ⏱  ตอบใน {(time.perf_counter() - t0) * 1000:.0f} ms นับจากพูดจบ (ถอดเสียง {ms:.0f} ms)")
             except Exception as e:
                 print(f"  ❌ ผิดพลาดระหว่างประมวลผล: {type(e).__name__}: {e}")
                 speaker.resume()
 
     try:
-        if MENUBAR and run_menubar(ears, assistant, listen_loop):
+        if MENUBAR and HUD and run_menubar(ears, assistant, listen_loop):
             pass
         else:
             listen_loop()

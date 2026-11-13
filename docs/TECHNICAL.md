@@ -1,8 +1,8 @@
-# รายละเอียดเชิงเทคนิค — จางวิท (Jarvis ไทย) บน Ubuntu 26.04 LTS
+# รายละเอียดเชิงเทคนิค — จางวิท (Jarvis ไทย) บน Raspberry Pi OS 64-bit และ Ubuntu
 
 > สำหรับนักพัฒนาที่สนใจสถาปัตยกรรมภายใน · คู่มือการใช้งานทั่วไปอยู่ที่ [README](../README.md)
 
-ผู้ช่วยเสียงภาษาไทยบน Ubuntu 26.04 LTS (GNOME Wayland / X11) แบบ **full duplex**: ฟังตลอดเวลา ไม่ต้องกดปุ่ม เรียก **"จางวิท"** แล้วคุยต่อเนื่องได้เหมือนเพื่อน
+ผู้ช่วยเสียงภาษาไทยบน Raspberry Pi OS 64-bit Desktop (X11) และ Ubuntu แบบ **full duplex**: ฟังตลอดเวลา ไม่ต้องกดปุ่ม เรียก **"จางวิท"** แล้วคุยต่อเนื่องได้เหมือนเพื่อน
 พูดแทรกได้ มีเสียงสังเคราะห์ภาษาไทยที่คมชัด มีหน้าจอ **J.A.R.V.I.S** โปร่งแสงลอยบนจอ (GTK3 + WebKit2) และทำงานในเครื่องเกือบทั้งหมด
 
 ```
@@ -18,7 +18,7 @@
 
 ```
 ไมค์ (ฟังตลอดเวลา) ─► ตัดเสียงสะท้อน AEC (WebRTC ผ่าน livekit) ─► Silero VAD ตัดเป็นประโยค
-   ─► ถอดเสียงไทยในเครื่อง: Faster-Whisper (CUDA float16 บน NVIDIA GPU หรือ int8 บน CPU)
+   ─► ส่งเสียงประโยคเป็น WAV ไปถอดเสียงผ่าน Typhoon ASR API (`typhoon-asr-realtime`)
    ─► ได้ยินคำปลุก "จางวิท" หรืออยู่ในช่วงสนทนาต่อเนื่องหรือไม่?
    ─► Jev (TypeSafe) ตัดสินใจแบบ Speculative Fan-out: ถามทุกมิติในครั้งเดียว
         category · compound · action · app (ทุกแอปจาก .desktop) · volume · chat
@@ -37,7 +37,7 @@
 - **ท่องเว็บอัตโนมัติ**: ควบคุมเบราว์เซอร์ผ่าน Playwright โดยแยก Profile (`.browser-profile`) เพื่อความปลอดภัย
 - **J.A.R.V.I.S HUD**: หน้าต่างโปร่งใส (Alpha channel) สร้างด้วย GTK3 + WebKit2 พร้อม WebGL/Canvas ring visualization
 
-## การควบคุมระบบปฏิบัติการบน Ubuntu 26.04
+## การควบคุมระบบปฏิบัติการบน Linux
 
 | การควบคุม | เครื่องมือที่ใช้ | คำอธิบาย |
 |---|---|---|
@@ -56,10 +56,10 @@
 | ตัวแปร | ค่าเริ่มต้น | ความหมาย |
 |---|---|---|
 | `TYPESAFE_API_KEY` | – (**จำเป็น**) | API Key สำหรับ Jev decision routing |
+| `TYPHOON_API_KEY` | – (**จำเป็นสำหรับเสียง**) | API Key สำหรับ Typhoon ASR; เสียงแต่ละประโยคจะถูกส่งไปยัง API |
+| `TYPHOON_ASR_MODEL` | `typhoon-asr-realtime` | โมเดลถอดเสียงของ Typhoon |
 | `LLM_MODE` | `local` | `local` = Ollama ในเครื่อง, `cloud` = Gemini หรือ OpenRouter |
 | `OLLAMA_MODEL` | `typhoon2:latest` | โมเดลภาษาไทยใน Ollama |
-| `STT_ENGINE` | `whisper` | ถอดเสียงด้วย Faster-Whisper |
-| `WHISPER_DEVICE` | `cuda` (ถ้ามี GPU) หรือ `cpu` | อุปกรณ์ประมวลผลสำหรับ Whisper |
 | `TTS_VOICE` | `th-TH-NiwatNeural` | เสียงภาษาไทยของ Edge TTS |
 | `WAKE_WORD` | `จางวิท` | คำปลุกระบบ (`off` เพื่อฟังทุกคำพูด) |
 | `CONF_MIN` | `0.65` | ระดับความเชื่อมั่นขั้นต่ำของ Jev |
