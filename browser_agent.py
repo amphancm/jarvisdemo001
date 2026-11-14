@@ -455,7 +455,8 @@ def _ensure_window(port: int) -> None:
 
 def _kill_our_chrome(profile_dir: Path) -> None:
     """ปิด Chrome ที่เปิดด้วยโปรไฟล์ของจางวิทเท่านั้น (ไม่แตะ Chrome ส่วนตัวของผู้ใช้)"""
-    out = subprocess.run(["pgrep", "-f", f"--user-data-dir={profile_dir}"], capture_output=True, text=True).stdout
+    out = subprocess.run(["pgrep", "-f", f"--user-data-dir={profile_dir}"], capture_output=True, text=True,
+                         timeout=5).stdout
     for pid in out.split():
         subprocess.run(["kill", pid], capture_output=True)
     for _ in range(50):

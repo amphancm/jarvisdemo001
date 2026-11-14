@@ -27,6 +27,7 @@ from difflib import SequenceMatcher
 import json
 import os
 from pathlib import Path
+import platform
 import queue
 import random
 import re
@@ -340,6 +341,8 @@ TTS_PITCH = env_str("TTS_PITCH", "")
 BARGE_IN = env_str("BARGE_IN", "auto").lower()          # auto | on | off
 SILENCE_MS = env_float("SILENCE_MS", 550)
 VAD_THRESHOLD = env_float("VAD_THRESHOLD", 0.5)
+MIC_DEVICE = env_str("MIC_DEVICE", "auto")
+SPEAKER_DEVICE = env_str("SPEAKER_DEVICE", "auto")
 LINUX_DESKTOP_APPS: dict[str, list[str]] = {}
 
 
@@ -432,10 +435,16 @@ SPEAK_FIRST = {"volume_mute", "lock_screen", "sleep"}
 VOLUME_STEP = 10
 FOLLOWUP_SEC = env_float("CONVO_SEC", 30)
 BROWSER_PROFILE = ROOT / ".browser-profile"
-FASTER_WHISPER_MODEL = env_str("FASTER_WHISPER_MODEL", "large-v3-turbo")
+TYPHOON_WHISPER_MODEL = "typhoon-ai/typhoon-whisper-large-v3"
+TYPHOON_WHISPER_CT2_DIR = ROOT / "models" / "typhoon-whisper-large-v3-ct2"
+FASTER_WHISPER_MODEL = env_str("FASTER_WHISPER_MODEL", TYPHOON_WHISPER_MODEL)
+WHISPER_DEVICE = env_str("WHISPER_DEVICE", "auto").lower()
+WHISPER_COMPUTE_TYPE = env_str("WHISPER_COMPUTE_TYPE", "auto").lower()
 _prompt_mode = env_str("WHISPER_PROMPT_MODE", "auto").lower()
 USE_WHISPER_PROMPT = _prompt_mode in ("on", "auto") and "typhoon" not in FASTER_WHISPER_MODEL.lower()
 SAVE_UTTERANCES = env_str("SAVE_UTTERANCES")
+HANDLE_TIMEOUT_SEC = env_float("HANDLE_TIMEOUT_SEC", 90)      # ประโยคหนึ่งประมวลผลนานสุดเท่านี้ ก่อนกลับไปฟังต่อ
+STALE_UTTERANCE_SEC = env_float("STALE_UTTERANCE_SEC", 25)    # ประโยคที่ค้างคิวนานกว่านี้ถือว่าเก่า ข้ามทิ้ง
 LOG_HEARD = env_str("LOG_HEARD", "").lower()
 STT_SECOND = env_str("STT_SECOND_OPINION", "off")
 JEV_PRICE_PER_MTOK = 0.042
@@ -671,7 +680,10 @@ def llm_chat(messages: list, model: str = "", tools: list | None = None,
         body |= {"chat_template_kwargs": {"enable_thinking": False}}
     error, statuses = "", []
     url = LocalLLM.url() if LLM_PROVIDER == "ในเครื่อง" else LLM_URL
+    deadline = time.monotonic() + timeout * 1.5     # กันรอทีละโมเดลต่อกันจนเงียบนานเกินไป
     for m in dict.fromkeys(x for x in (model or LLM_MODEL, _FALLBACK_MODEL) if x):
+        if error and time.monotonic() >= deadline:
+            break
         try:
             r = requests.post(url, json={**body, "model": m}, timeout=timeout,
                               headers={"Authorization": f"Bearer {LLM_KEY}", "X-Title": "Jarvis Thai"})
@@ -681,7 +693,7 @@ def llm_chat(messages: list, model: str = "", tools: list | None = None,
                 time.sleep(wait + 0.5)
                 r = requests.post(url, json={**body, "model": m}, timeout=timeout,
                                   headers={"Authorization": f"Bearer {LLM_KEY}", "X-Title": "Jarvis Thai"})
-        except (requests.Timeout, requests.ConnectionError) as e:
+        except requests.RequestException as e:
             error = f"{LLM_PROVIDER} {m} → {type(e).__name__}"
             print(f"  ⚠️  {error} — ลองโมเดลสำรอง")
             continue
@@ -1129,6 +1141,14 @@ def read_cmd(cmd: list[str]) -> str:
         return ""
 
 
+def _run_quiet(cmd: list[str], timeout: float = 8) -> subprocess.CompletedProcess:
+    """รันคำสั่งโดยมีเวลาจำกัด: ค้างหรือหาไม่เจอจะคืน returncode=1 แทนที่จะทำให้จางวิททั้งตัวรอ"""
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+
 def app_running(app: str) -> bool:
     """เช็คว่าแอปกำลังรันอยู่หรือไม่บน Ubuntu"""
     proc_name = app.lower()
@@ -1182,35 +1202,24 @@ def _set_linux_volume(vol: int, mute: bool = False) -> bool:
     """ปรับระดับเสียงหรือปิดเสียงบน Ubuntu (รองรับ wpctl, pactl, amixer)"""
     vol = max(0, min(100, vol))
     if mute:
-        if shutil.which("wpctl"):
-            r = subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1"], capture_output=True)
-            if r.returncode == 0:
-                return True
-        if shutil.which("pactl"):
-            r = subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"], capture_output=True)
-            if r.returncode == 0:
-                return True
-        if shutil.which("amixer"):
-            r = subprocess.run(["amixer", "sset", "Master", "mute"], capture_output=True)
-            if r.returncode == 0:
-                return True
-        return False
+        if shutil.which("wpctl") and _run_quiet(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1"]).returncode == 0:
+            return True
+        if shutil.which("pactl") and _run_quiet(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"]).returncode == 0:
+            return True
+        return shutil.which("amixer") is not None and _run_quiet(["amixer", "sset", "Master", "mute"]).returncode == 0
 
     frac = f"{vol / 100.0:.2f}"
     if shutil.which("wpctl"):
-        subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], capture_output=True)
-        r = subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", frac], capture_output=True)
-        if r.returncode == 0:
+        _run_quiet(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"])
+        if _run_quiet(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", frac]).returncode == 0:
             return True
     if shutil.which("pactl"):
-        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"], capture_output=True)
-        r = subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{vol}%"], capture_output=True)
-        if r.returncode == 0:
+        _run_quiet(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"])
+        if _run_quiet(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{vol}%"]).returncode == 0:
             return True
     if shutil.which("amixer"):
-        subprocess.run(["amixer", "sset", "Master", "unmute"], capture_output=True)
-        r = subprocess.run(["amixer", "sset", "Master", f"{vol}%"], capture_output=True)
-        if r.returncode == 0:
+        _run_quiet(["amixer", "sset", "Master", "unmute"])
+        if _run_quiet(["amixer", "sset", "Master", f"{vol}%"]).returncode == 0:
             return True
     return False
 
@@ -1220,8 +1229,7 @@ def _control_mpris(action: str) -> bool:
     if shutil.which("playerctl"):
         act_map = {"music_play": "play", "music_pause": "pause", "music_next": "next", "music_previous": "previous"}
         cmd = ["playerctl", act_map.get(action, "play-pause")]
-        r = subprocess.run(cmd, capture_output=True)
-        if r.returncode == 0:
+        if _run_quiet(cmd).returncode == 0:
             return True
     method_map = {
         "music_play": "Play",
@@ -1234,8 +1242,7 @@ def _control_mpris(action: str) -> bool:
         "busctl", "--user", "call", "org.mpris.MediaPlayer2.spotify",
         "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", m
     ]
-    r = subprocess.run(cmd, capture_output=True)
-    return r.returncode == 0
+    return _run_quiet(cmd).returncode == 0
 
 
 def _toggle_dark_mode() -> bool:
@@ -1243,8 +1250,7 @@ def _toggle_dark_mode() -> bool:
     try:
         cur = read_cmd(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"]).strip("'\"")
         new_mode = "default" if cur == "prefer-dark" else "prefer-dark"
-        r = subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", new_mode], capture_output=True)
-        return r.returncode == 0
+        return _run_quiet(["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", new_mode]).returncode == 0
     except Exception:
         return False
 
@@ -1365,16 +1371,30 @@ def execute(plan: Plan, dry_run: bool) -> bool:
             print(f"  🧪 [dry-run] {label}{shlex.join(cmd)}")
             continue
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        except (OSError, subprocess.TimeoutExpired) as e:
+            rc, err = _launch(cmd)
+        except OSError as e:
             print(f"  ⚙️  {label}{shlex.join(cmd)} → ล้มเหลว: {e}")
             continue
-        print(f"  ⚙️  {label}{shlex.join(cmd)} → rc={r.returncode}")
-        if r.returncode == 0:
+        print(f"  ⚙️  {label}{shlex.join(cmd)} → {'รันต่ออยู่เบื้องหลัง' if rc is None else f'rc={rc}'}")
+        if rc is None or rc == 0:
             return True
-        if r.stderr.strip():
-            print(f"     {r.stderr.strip()[:200]}")
+        if err:
+            print(f"     {err}")
     return dry_run or not plan.cmds
+
+
+def _launch(cmd: list[str], wait: float = 4) -> tuple[int | None, str]:
+    """เปิดคำสั่งแยกจากจางวิท: แอป GUI (เช่น Chrome, Spotify) ไม่คืนค่าจนกว่าผู้ใช้จะปิด
+    ถ้ายังรันอยู่หลังรอ `wait` วิ ถือว่าเปิดสำเร็จ (คืน None) และปล่อยให้รันต่อ ไม่ฆ่าทิ้ง"""
+    with tempfile.TemporaryFile() as errf:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errf,
+                                start_new_session=True)
+        try:
+            rc = proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            return None, ""
+        errf.seek(0)
+        return rc, errf.read().decode("utf-8", "ignore").strip()[:200]
 
 
 def save_utterance(audio: np.ndarray, text: str) -> None:
@@ -1427,7 +1447,7 @@ class Assistant:
         self.hud_rect = None
         self.last_failed, self.last_failed_at = "", 0.0
         from concurrent.futures import ThreadPoolExecutor
-        self._pool = ThreadPoolExecutor(max_workers=1)
+        self._pool = ThreadPoolExecutor(max_workers=2)      # งานคิดล่วงหน้าที่ค้างอยู่ต้องไม่บล็อกคำถามถัดไป
         self._stt_pool = ThreadPoolExecutor(max_workers=1)
         self._early = None
 
@@ -1549,7 +1569,11 @@ class Assistant:
     def _chat_reply(self, text: str, early=None, early_text: str = "") -> None:
         self.misses = 0
         if early is not None and early_text == text and not early.cancelled():
-            answer, ok = early.result()
+            try:
+                answer, ok = early.result(timeout=60)
+            except Exception as e:
+                print(f"  ❌ LLM ไม่ตอบทันเวลา: {type(e).__name__}")
+                answer, ok = pick("llm_error"), False
         else:
             answer, ok = self._think(text)
         self.speaker.say(answer)
@@ -1739,14 +1763,14 @@ def synthesize(text: str) -> np.ndarray | None:
                     chunks.append(chunk["data"])
             return b"".join(chunks)
 
-        mp3_bytes = asyncio.run(_fetch())
+        mp3_bytes = asyncio.run(asyncio.wait_for(_fetch(), timeout=20))
         if mp3_bytes and not (_SHUTTING_DOWN.is_set() or sys.is_finalizing()):
             decoded = miniaudio.decode(mp3_bytes, output_format=miniaudio.SampleFormat.SIGNED16,
                                        nchannels=1, sample_rate=RATE)
             return np.frombuffer(decoded.samples, dtype=np.int16).copy()
     except Exception as e:
         if not (_SHUTTING_DOWN.is_set() or sys.is_finalizing()):
-            print(f"  ⚠️  edge-tts ล้มเหลว ({e})")
+            print(f"  ⚠️  edge-tts ล้มเหลว ({e or type(e).__name__})")
     return None
 
 
@@ -1860,7 +1884,10 @@ class SaySpeaker:
                 if audio is not None:
                     try:
                         import sounddevice as sd
-                        sd.play(audio, samplerate=RATE, blocking=True)
+                        device = _select_output_device(sd, SPEAKER_DEVICE)
+                        sample_rate = _select_audio_rate(sd, device, "output")
+                        audio = _resample_audio(audio, RATE, sample_rate)
+                        sd.play(audio, samplerate=sample_rate, device=device, blocking=True)
                     except Exception as e:
                         print(f"  ⚠️  เล่นเสียงไม่สำเร็จ: {e}")
             finally:
@@ -1910,8 +1937,12 @@ class Speaker:
         self._last_sound = 0.0
         self._reply_start = 0.0
         self.level = 0.0
-        self.stream = sd.OutputStream(samplerate=RATE, channels=1, dtype="int16",
-                                      blocksize=self.BLOCK, callback=self._on_output)
+        self.output_device = _select_output_device(sd, SPEAKER_DEVICE)
+        self.sample_rate = _select_audio_rate(sd, self.output_device, "output")
+        blocksize = round(self.BLOCK * self.sample_rate / RATE)
+        self.stream = sd.OutputStream(samplerate=self.sample_rate, channels=1, dtype="int16",
+                                      blocksize=blocksize, callback=self._on_output,
+                                      device=self.output_device)
         self.stream.start()
         threading.Thread(target=self._synth_loop, daemon=True).start()
 
@@ -1975,7 +2006,7 @@ class Speaker:
                 audio = speech_audio(text) if gen == self._gen else None
                 with self._lock:
                     if audio is not None and gen == self._gen:
-                        self._chunks.append(audio)
+                        self._chunks.append(_resample_audio(audio, RATE, self.sample_rate))
             except Exception as e:
                 if not (_SHUTTING_DOWN.is_set() or sys.is_finalizing()):
                     print(f"  ⚠️  เตรียมเสียงไม่สำเร็จ: {e}")
@@ -2005,7 +2036,7 @@ class Speaker:
         outdata[:, 0] = out
         self.level = float(np.sqrt(np.mean(out.astype(np.float32) ** 2))) / 32768
         if self.on_played is not None:
-            self.on_played(out)
+            self.on_played(_resample_audio(out, self.sample_rate, RATE))
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2059,6 +2090,98 @@ class Segmenter:
         return audio, False
 
 
+def _select_input_device(sd, preference: str) -> int:
+    devices = list(sd.query_devices())
+    inputs = [
+        (index, device) for index, device in enumerate(devices)
+        if device["max_input_channels"] > 0
+    ]
+    if not inputs:
+        raise RuntimeError("ไม่พบอุปกรณ์รับเสียง")
+
+    if preference.strip().lower() != "auto":
+        wanted = preference.strip().casefold()
+        matches = [
+            (index, device) for index, device in inputs
+            if wanted == str(index) or wanted in device["name"].casefold()
+        ]
+        if len(matches) == 1:
+            return matches[0][0]
+        available = ", ".join(f"{index}: {device['name']}" for index, device in inputs)
+        if not matches:
+            raise ValueError(f"ไม่พบ MIC_DEVICE={preference}; อุปกรณ์รับเสียง: {available}")
+        raise ValueError(f"MIC_DEVICE={preference} ตรงกับหลายอุปกรณ์: "
+                         + ", ".join(f"{index}: {device['name']}" for index, device in matches))
+
+    pipewire = next(
+        (index for index, device in inputs if device["name"].strip().casefold() == "pipewire"),
+        None,
+    )
+    if pipewire is not None:
+        return pipewire
+
+    default_input = sd.default.device[0]
+    if default_input is not None and default_input >= 0:
+        if any(index == default_input for index, _ in inputs):
+            return default_input
+    return inputs[0][0]
+
+
+def _select_output_device(sd, preference: str = "auto") -> int:
+    """เลือกลำโพง: auto = PipeWire (ตามเอาต์พุตเริ่มต้นของระบบ เช่น HDMI) เพราะ ALSA default บน Jetson ชี้ไป APE ที่ไม่มีเสียง"""
+    devices = list(sd.query_devices())
+    outputs = [(i, d) for i, d in enumerate(devices) if d["max_output_channels"] > 0]
+    if not outputs:
+        raise RuntimeError("ไม่พบอุปกรณ์เล่นเสียง")
+    if preference.strip().lower() != "auto":
+        wanted = preference.strip().casefold()
+        matches = [(i, d) for i, d in outputs if wanted == str(i) or wanted in d["name"].casefold()]
+        if len(matches) == 1:
+            return matches[0][0]
+        available = ", ".join(f"{i}: {d['name']}" for i, d in outputs)
+        if not matches:
+            raise ValueError(f"ไม่พบ SPEAKER_DEVICE={preference}; อุปกรณ์เล่นเสียง: {available}")
+        raise ValueError(f"SPEAKER_DEVICE={preference} ตรงกับหลายอุปกรณ์: "
+                         + ", ".join(f"{i}: {d['name']}" for i, d in matches))
+    for name in ("pipewire", "pulse"):
+        hit = next((i for i, d in outputs if d["name"].strip().casefold() == name), None)
+        if hit is not None:
+            return hit
+    default_output = sd.default.device[1]
+    if default_output is not None and default_output >= 0:
+        return default_output
+    return outputs[0][0]
+
+
+def _select_audio_rate(sd, device, direction: str) -> int:
+    info = sd.query_devices(device, direction)
+    preferred = [RATE]
+    default_rate = int(round(info["default_samplerate"]))
+    if default_rate > 0:
+        preferred.append(default_rate)
+    preferred.extend((48000, 44100, 32000, 24000, 22050, 8000))
+    check_settings = getattr(sd, f"check_{direction}_settings")
+    last_error = None
+    for sample_rate in dict.fromkeys(preferred):
+        try:
+            check_settings(device=device, channels=1, dtype="int16", samplerate=sample_rate)
+        except Exception as e:
+            last_error = e
+        else:
+            return sample_rate
+    raise RuntimeError(
+        f"ไม่พบ sample rate ที่รองรับสำหรับอุปกรณ์เสียง {direction}: {last_error}"
+    ) from last_error
+
+
+def _resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if source_rate == target_rate or not len(audio):
+        return audio
+    target_length = round(len(audio) * target_rate / source_rate)
+    positions = np.arange(target_length) * source_rate / target_rate
+    return np.interp(positions, np.arange(len(audio)), audio).astype(audio.dtype)
+
+
 def make_echo_canceller():
     try:
         from livekit import rtc
@@ -2090,8 +2213,13 @@ class Ears:
         self._talk = 0
         self._overlap = self._interrupted = False
         speaker.on_played = self._reference
-        self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16",
-                                     blocksize=self.BLOCK, callback=self._on_input)
+        self.input_device = _select_input_device(sd, MIC_DEVICE)
+        print(f"🎙  ไมค์: {sd.query_devices(self.input_device)['name']}")
+        self.sample_rate = _select_audio_rate(sd, self.input_device, "input")
+        blocksize = round(self.BLOCK * self.sample_rate / RATE)
+        self.stream = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype="int16",
+                                     blocksize=blocksize, callback=self._on_input,
+                                     device=self.input_device)
 
     def start(self) -> None:
         self.stream.start()
@@ -2141,7 +2269,7 @@ class Ears:
 
     def _on_input(self, indata, frames, time_info, status) -> None:
         self._adc_lag = max(0.0, time_info.currentTime - time_info.inputBufferAdcTime)
-        block = indata[:, 0].copy()
+        block = _resample_audio(indata[:, 0].copy(), self.sample_rate, RATE)
         with self._apm_lock:
             if self.apm is not None:
                 try:
@@ -2162,7 +2290,17 @@ class Ears:
             while len(pending) >= VAD_CHUNK:
                 chunk, pending = pending[:VAD_CHUNK], pending[VAD_CHUNK:]
                 heard = max(heard, int(np.abs(chunk).max()))
-                self._on_chunk(chunk)
+                try:
+                    self._on_chunk(chunk)
+                except Exception as e:      # เธรดนี้ตายแล้วจางวิทจะหูหนวกถาวร จึงต้องกันไว้
+                    print(f"\n⚠️  ประมวลผลเสียงจากไมค์ผิดพลาด ({type(e).__name__}: {e}) — รีเซ็ตตัวฟัง")
+                    self.seg.reset()
+                    self.seg.preroll.clear()
+                    try:
+                        self.vad.reset()
+                    except Exception:
+                        pass
+                    self.speaker.resume()
             if not warned and heard == 0 and time.monotonic() - started > 3:
                 warned = True
                 print("⚠️  ไมค์ส่งมาแต่ความเงียบสนิท — ตรวจสอบการตั้งค่าไมค์ในระบบ")
@@ -2198,7 +2336,8 @@ class Ears:
                 if self._interrupted:
                     self.speaker.resume()
                 return
-            self.utterances.put((audio.astype(np.float32) / 32768.0, self._overlap, self._interrupted))
+            self.utterances.put((audio.astype(np.float32) / 32768.0, self._overlap, self._interrupted,
+                                 time.monotonic()))
 
 
 LOOP_RE = re.compile(r"([^\s\d].{0,14}?)(?:\s*\1){2,}")
@@ -2232,6 +2371,50 @@ def is_echo(text: str, recent) -> bool:
 # 9) แปลงเสียงเป็นข้อความ (faster-whisper ในเครื่องบน Ubuntu 26.04)
 # ════════════════════════════════════════════════════════════════════════════
 
+def _select_whisper_device(preference: str, cuda_devices: int) -> str:
+    if preference not in ("auto", "cuda", "cpu"):
+        raise ValueError("WHISPER_DEVICE ต้องเป็น auto, cuda หรือ cpu")
+    if preference == "cuda" and cuda_devices < 1:
+        raise RuntimeError(
+            "ตั้ง WHISPER_DEVICE=cuda แต่ CTranslate2 ไม่พบ CUDA device "
+            "(Jetson ต้องติดตั้ง CUDA-enabled CTranslate2)"
+        )
+    return "cuda" if preference == "cuda" or (preference == "auto" and cuda_devices > 0) else "cpu"
+
+
+def _select_whisper_compute_type(
+    preference: str, device: str, machine: str, supported: set[str]
+) -> str:
+    if preference == "auto":
+        if device == "cuda":
+            if machine in ("aarch64", "arm64"):
+                preferred = ("int8_float16", "float16")
+            else:
+                preferred = ("float16", "int8_float16")
+        else:
+            preferred = ("int8", "float32")
+        compute = next((value for value in preferred if value in supported), "")
+    else:
+        compute = preference
+    if compute not in supported:
+        raise ValueError(
+            f"WHISPER_COMPUTE_TYPE={preference} ใช้กับ {device} ไม่ได้; "
+            f"ชนิดที่รองรับ: {', '.join(sorted(supported)) or 'ไม่มี'}"
+        )
+    return compute
+
+
+def _resolve_whisper_model(model_name: str, converted_model_dir: Path) -> str:
+    if model_name != TYPHOON_WHISPER_MODEL:
+        return model_name
+    if not (converted_model_dir / "model.bin").is_file():
+        raise FileNotFoundError(
+            "Typhoon Whisper is a Transformers checkpoint, not a Faster-Whisper model. "
+            "Convert it first with scripts/convert_typhoon_whisper_for_jetson.sh."
+        )
+    return str(converted_model_dir)
+
+
 def _preload_cuda_libs() -> None:
     """โหลด cuBLAS/cuDNN จากแพ็กเกจ pip (nvidia-cublas-cu12, nvidia-cudnn-cu12) ให้ CTranslate2 ใช้ GPU ได้
     โดยไม่ต้องตั้ง LD_LIBRARY_PATH เอง"""
@@ -2254,13 +2437,16 @@ class STT:
     def __init__(self):
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         _preload_cuda_libs()
-        device, compute = "cpu", "int8"
-        try:
-            import ctranslate2
-            if ctranslate2.get_cuda_device_count() > 0:
-                device, compute = "cuda", "float16"
-        except Exception:
-            pass
+        import ctranslate2
+
+        cuda_devices = ctranslate2.get_cuda_device_count()
+        device = _select_whisper_device(WHISPER_DEVICE, cuda_devices)
+        if WHISPER_DEVICE == "auto" and cuda_devices == 0:
+            print("⚠️  CTranslate2 ไม่พบ CUDA; ใช้ Faster-Whisper บน CPU")
+        supported = ctranslate2.get_supported_compute_types(device)
+        compute = _select_whisper_compute_type(
+            WHISPER_COMPUTE_TYPE, device, platform.machine().lower(), supported
+        )
         try:
             from faster_whisper import WhisperModel
         except ImportError:
@@ -2273,7 +2459,8 @@ class STT:
                 "    rm -rf .venv && python3 -m venv --system-site-packages .venv\n"
                 "    .venv/bin/pip install -r requirements.txt\n"
             )
-        self._model = WhisperModel(FASTER_WHISPER_MODEL, device=device, compute_type=compute)
+        model_path = _resolve_whisper_model(FASTER_WHISPER_MODEL, TYPHOON_WHISPER_CT2_DIR)
+        self._model = WhisperModel(model_path, device=device, compute_type=compute)
         self.whisper_name = f"faster-whisper · {FASTER_WHISPER_MODEL} {compute} {device.upper()}"
         self.name = self.whisper_name
         self.second = STT_SECOND if STT_SECOND.lower() not in ("off", "0", "no", "") else ""
@@ -2582,26 +2769,41 @@ def run_mic(dry_run: bool) -> None:
     speaker.say(pick("ready"))
     threading.Thread(target=warm_tts, daemon=True).start()
 
+    def process(audio, overlapped, interrupted) -> None:
+        try:
+            t0 = time.perf_counter()
+            text = stt.transcribe(audio)
+            ms = (time.perf_counter() - t0) * 1000
+            if SAVE_UTTERANCES:
+                save_utterance(audio, text)
+            if not should_handle(text, assistant, speaker.recent, overlapped):
+                if interrupted:
+                    speaker.resume()
+                return
+            if interrupted:
+                speaker.stop()
+            print(f"\n🗣️  {text}  ·  STT {ms:.0f} ms ({len(audio) / RATE:.1f} วิ)")
+            assistant.handle(text, (lambda a=audio: stt.transcribe_second(a)) if stt.second else None)
+            print(f"  ⏱  ตอบใน {(time.perf_counter() - t0) * 1000:.0f} ms นับจากพูดจบ (ถอดเสียง {ms:.0f} ms)")
+        except Exception as e:
+            print(f"  ❌ ผิดพลาดระหว่างประมวลผล: {type(e).__name__}: {e}")
+            speaker.resume()
+
     def listen_loop() -> None:
         while True:
-            audio, overlapped, interrupted = ears.utterances.get()
-            try:
-                t0 = time.perf_counter()
-                text = stt.transcribe(audio)
-                ms = (time.perf_counter() - t0) * 1000
-                if SAVE_UTTERANCES:
-                    save_utterance(audio, text)
-                if not should_handle(text, assistant, speaker.recent, overlapped):
-                    if interrupted:
-                        speaker.resume()
-                    continue
+            audio, overlapped, interrupted, heard_at = ears.utterances.get()
+            if time.monotonic() - heard_at > STALE_UTTERANCE_SEC:
+                print(f"  ⏭  ข้ามประโยคเก่าที่ค้างคิว ({time.monotonic() - heard_at:.0f} วิ)")
                 if interrupted:
-                    speaker.stop()
-                print(f"\n🗣️  {text}  ·  STT {ms:.0f} ms ({len(audio) / RATE:.1f} วิ)")
-                assistant.handle(text, (lambda a=audio: stt.transcribe_second(a)) if stt.second else None)
-                print(f"  ⏱  ตอบใน {(time.perf_counter() - t0) * 1000:.0f} ms นับจากพูดจบ (ถอดเสียง {ms:.0f} ms)")
-            except Exception as e:
-                print(f"  ❌ ผิดพลาดระหว่างประมวลผล: {type(e).__name__}: {e}")
+                    speaker.resume()
+                continue
+            # ประมวลผลในเธรดแยก: ถ้าขั้นไหนค้าง (เครือข่าย/เสียง/GPU) จะไม่ทำให้การฟังหยุดตามไปด้วย
+            worker = threading.Thread(target=process, args=(audio, overlapped, interrupted), daemon=True)
+            worker.start()
+            worker.join(HANDLE_TIMEOUT_SEC)
+            if worker.is_alive():
+                print(f"  ⏱  ประมวลผลเกิน {HANDLE_TIMEOUT_SEC:.0f} วิ — ปล่อยงานนั้นไว้ แล้วกลับมาฟังต่อ")
+                assistant.thinking = False
                 speaker.resume()
 
     try:
