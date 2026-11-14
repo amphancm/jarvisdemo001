@@ -85,7 +85,26 @@ wheel aarch64 ปกติจาก PyPI เป็น CPU-only จึงต้�
 
 สคริปต์ build สำหรับ GPU architecture SM 8.7, จำกัดงานคอมไพล์ไว้หนึ่งงานเพื่อลดการใช้ RAM และทดสอบว่า wheel พบ CUDA ก่อนแทนที่แพ็กเกจใน `.venv` ไฟล์ไลบรารีจะอยู่ที่ `.venv/ctranslate2`; สคริปต์ build ไม่ใช้ `sudo` และลบ source/build ชั่วคราวเมื่อเสร็จ
 
-### 4. ตั้งค่า API keys และเริ่มใช้งาน
+### 4. แปลงโมเดล Typhoon Whisper
+
+การติดตั้ง CTranslate2 CUDA ไม่ได้ดาวน์โหลดหรือแปลงโมเดล ต้องทำขั้นตอนนี้อีกครั้งหนึ่ง
+การดาวน์โหลดและแปลงโมเดลใช้พื้นที่และหน่วยความจำหลาย GB รวมถึงอินเทอร์เน็ต
+ใช้ environment แยกเพื่อไม่ให้แทนที่ CTranslate2 CUDA ใน `.venv`:
+
+```bash
+python3 -m venv .venv/typhoon-conversion
+.venv/typhoon-conversion/bin/python -m pip install 'torch==2.8.0+cpu' \
+    --index-url https://download.pytorch.org/whl/cpu
+.venv/typhoon-conversion/bin/python -m pip install 'ctranslate2==4.9.0' \
+    'transformers==4.57.6' accelerate
+CTRANSLATE2_CONVERTER="$PWD/.venv/typhoon-conversion/bin/ct2-transformers-converter" \
+    OMP_NUM_THREADS=2 bash scripts/convert_typhoon_whisper_for_jetson.sh
+```
+
+สคริปต์สร้างโมเดลที่ `models/typhoon-whisper-large-v3-ct2` หากแปลงบนเครื่องอื่น
+ให้คัดลอกโฟลเดอร์นี้มายัง Jetson แทนการแปลงซ้ำ
+
+### 5. ตั้งค่า API keys และเริ่มใช้งาน
 
 ```bash
 cp .env.example .env
@@ -99,6 +118,8 @@ cp .env.example .env
 ./run_app.sh
 ```
 
+หากติดตั้ง `requirements.txt` ใหม่บน Jetson ให้รันสคริปต์ CTranslate2 CUDA ซ้ำ เพราะ pip อาจแทนที่ wheel ที่คอมไพล์เองด้วย wheel CPU-only
+
 ค่าปริยายใช้ Typhoon Whisper ที่แปลงเป็น CTranslate2 และเลือก CUDA `int8_float16` บน Jetson เพื่อลดการใช้หน่วยความจำ หากไม่มี CUDA-enabled CTranslate2 ระบบจะแจ้งเตือนและกลับไปใช้ CPU; ตั้ง `WHISPER_DEVICE=cuda` ใน `.env` เพื่อบังคับใช้ GPU และให้เริ่มต้นล้มเหลวเมื่อไม่พบ CUDA จางวิทจะเปิด HUD; ปิดด้วย **Ctrl+C** หรือเมนู **ออก** ที่ System Tray
 
 ### ทดสอบระบบ (Selftest)
@@ -110,27 +131,6 @@ cp .env.example .env
 ```
 
 การทดสอบจะเปิดหน้าต่างทดสอบของตัวเองกลางจอ และไม่แตะต้องหน้าต่างงานอื่นๆ ของคุณ
-
-## ติดตั้งบน Ubuntu Desktop 26.04
-
-สำหรับเครื่อง Desktop ที่ไม่ใช่ Jetson ให้ติดตั้งแพ็กเกจระบบ:
-
-```bash
-sudo apt update
-sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1 gir1.2-atspi-2.0 \
-    tesseract-ocr tesseract-ocr-tha xdotool wireplumber libportaudio2 ffmpeg
-```
-
-จากนั้นสร้าง environment และติดตั้ง dependencies:
-
-```bash
-python3 -m venv --system-site-packages .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env
-./run_app.sh
-```
-
-หากติดตั้ง `requirements.txt` ใหม่บน Jetson ให้รันสคริปต์ CTranslate2 CUDA ซ้ำ เพราะ pip อาจแทนที่ wheel ที่คอมไพล์เองด้วย wheel CPU-only
 
 ## ปรับแต่ง (ไฟล์ `.env`)
 

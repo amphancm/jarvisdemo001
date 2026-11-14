@@ -2632,7 +2632,10 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
     if visual is not None:
         win.set_visual(visual)
 
-    sw, sh = screen.get_width(), screen.get_height()
+    display = screen.get_display()
+    monitor = display.get_primary_monitor() or display.get_monitor(0)
+    geo = monitor.get_geometry()
+    sw, sh = geo.width, geo.height
     x = int(saved.get("x", sw - 380 - 30))
     y = int(saved.get("y", sh - 450 - 70))
     win.move(x, y)
@@ -2659,7 +2662,10 @@ def run_menubar(ears: Ears, assistant: Assistant, listen_loop) -> bool:
                 data = {"state": st, "level": round(lvl, 4), "pinned": pinned[0],
                         "heard": assistant.last_text[-80:], "reply": recent[-1][1][:90] if recent else ""}
                 js = f"window.hud && hud.update({json.dumps(data)})"
-                webview.run_javascript(js, None, None, None)
+                if hasattr(webview, "evaluate_javascript"):
+                    webview.evaluate_javascript(js, -1, None, None, None, None, None)
+                else:
+                    webview.run_javascript(js, None, None, None)
             except Exception:
                 pass
         else:
